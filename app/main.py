@@ -27,6 +27,8 @@ from app.tools.shell import ShellTool
 from app.tools.web_search import WebSearchTool
 
 
+ADMIN_VISIBILITY_TTL_SECONDS = 2.0
+
 settings = get_settings()
 memory_store = MemoryStore(settings.db_path)
 llm_adapter = LLMAdapter(settings)
@@ -107,6 +109,13 @@ async def list_interactions() -> dict[str, object]:
 @app.post("/api/interactions")
 async def interact(payload: InteractionRequest) -> dict[str, object]:
     text = (payload.message or payload.note or "").strip()
+    if not perception_service.admin_visible_recently(max_age_seconds=ADMIN_VISIBILITY_TTL_SECONDS):
+        return {
+            "message": "",
+            "detail": "Admin not visible in the camera frame. Waiting for the admin to come back on screen.",
+            "gated": True,
+        }
+
     media_path = None
     if payload.audio_data_url:
         try:

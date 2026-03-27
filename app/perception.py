@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ class PerceptionService:
         self._admin_face_path = admin_face_path
         self._admin_metadata_path = admin_face_path.with_suffix(".json")
         self._admin_embedding, self._admin_sample_count = self._load_admin_profile()
+        self._latest_observation: dict[str, Any] | None = None
+        self._latest_observation_monotonic: float | None = None
 
     def analyze_snapshot(
         self,
@@ -53,7 +56,7 @@ class PerceptionService:
         admin_detected = bool(admin_faces)
         rendered_faces = [self._render_face(face) for face in classified_faces]
 
-        return {
+        observation = {
             "admin_present": len(faces) > 0,
             "admin_detected": admin_detected,
             "face_count": int(len(faces)),
@@ -67,9 +70,11 @@ class PerceptionService:
             "admin_sample_count": self._admin_sample_count,
             "admin_learning_state": self._admin_learning_state(),
         }
+        self._remember_latest_observation(observation)
+        return observation
 
     def _empty_observation(self, note: str | None) -> dict[str, Any]:
-        return {
+        observation = {
             "admin_present": False,
             "admin_detected": False,
             "face_count": 0,
@@ -83,6 +88,19 @@ class PerceptionService:
             "admin_sample_count": self._admin_sample_count,
             "admin_learning_state": self._admin_learning_state(),
         }
+        self._remember_latest_observation(observation)
+        return observation
+
+    def admin_visible_recently(self, max_age_seconds: float = 2.0) -> bool:
+        if not self._latest_observation or self._latest_observation_monotonic is None:
+            return False
+        if time.monotonic() - self._latest_observation_monotonic > max_age_seconds:
+            return False
+        return bool(self._latest_observation.get("admin_detected"))
+
+    def _remember_latest_observation(self, observation: dict[str, Any]) -> None:
+        self._latest_observation = observation.copy()
+        self._latest_observation_monotonic = time.monotonic()
 
     def _decode_data_url(self, image_data_url: str) -> np.ndarray:
         encoded = image_data_url.split(",", maxsplit=1)[1]

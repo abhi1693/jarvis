@@ -74,3 +74,15 @@ def test_live_observation_can_skip_snapshot_persistence(tmp_path):
 
     assert observation["image_path"] is None
     assert calls["count"] == 0
+
+
+def test_admin_visibility_requires_fresh_admin_detection(tmp_path):
+    service = PerceptionService(tmp_path / "snapshots", tmp_path / "admin_face.npy")
+
+    assert service.admin_visible_recently() is False
+
+    service._remember_latest_observation({"admin_detected": True})
+    assert service.admin_visible_recently(max_age_seconds=1.0) is True
+
+    service._latest_observation_monotonic -= 5.0
+    assert service.admin_visible_recently(max_age_seconds=1.0) is False
