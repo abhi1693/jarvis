@@ -8,5 +8,6 @@ data/*.db
 data/*.npy
 data/admin_face.json
 data/audio/
+data/agent_brain/
 data/snapshots/
 data/change_sets/
