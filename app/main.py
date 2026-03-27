@@ -171,17 +171,6 @@ async def observe(payload: ObservationRequest) -> dict[str, object]:
     return observation
 
 
-@app.post("/api/vision/enroll")
-async def enroll_admin_face(payload: ObservationRequest) -> dict[str, object]:
-    if not payload.image_data_url:
-        raise HTTPException(status_code=400, detail="image_data_url is required")
-
-    try:
-        return perception_service.enroll_admin(payload.image_data_url)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-
-
 @app.post("/api/profile")
 async def update_profile(payload: ProfileRequest) -> dict[str, str]:
     agent.update_profile(payload.model_dump())

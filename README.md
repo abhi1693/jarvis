@@ -39,7 +39,7 @@ normal interaction, and the system stores that as durable operating context.
 - `app/intents.py`
   Rule-based and optional LLM-backed extraction of duties, constraints, preferences, and tasks.
 - `app/perception.py`
-  Camera frame analysis using OpenCV face detection.
+  Camera frame analysis using OpenCV face detection and self-learning admin matching.
 - `app/media.py`
   Audio file persistence from browser-captured voice input.
 - `app/self_improvement.py`
@@ -52,7 +52,7 @@ normal interaction, and the system stores that as durable operating context.
 - `app/static/index.html`
   Interface for vision, voice, text, operating context, memory, skills, and insights.
 - `app/static/app.js`
-  Browser camera capture, face overlays, admin enrollment, live mic interaction, and API calls.
+  Browser camera capture, face overlays, live mic interaction, and API calls.
 - `app/static/styles.css`
   Minimal UI styling.
 
@@ -90,7 +90,9 @@ This is a solid multimodal MVP, not a finished autonomous organism.
 - Voice understanding depends on browser speech recognition support unless you add a local STT
   backend later.
 - Camera input currently detects presence, not identity.
-- Camera now supports a simple local admin-face enrollment flow and draws dashed red/yellow/green boxes, but the recognition model is intentionally lightweight and not production-grade biometrics.
+- The first persistent face seen by the camera becomes the initial admin baseline and the local
+  matcher refines that baseline over time. It still uses a lightweight local model, not
+  production-grade biometrics.
 - Evolution is bounded to scanning, remembering, and safe local maintenance operations.
 - There is no full autonomous planner yet for long-horizon self-directed tasks.
 - Context extraction is generic but still heuristic in rule-based mode; a better local model will

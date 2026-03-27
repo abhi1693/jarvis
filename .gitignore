@@ -6,6 +6,7 @@ __pycache__/
 .idea/
 data/*.db
 data/*.npy
+data/admin_face.json
 data/audio/
 data/snapshots/
 data/change_sets/

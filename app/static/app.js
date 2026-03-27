@@ -14,7 +14,6 @@ const contextList = document.querySelector("#context-list");
 const video = document.querySelector("#camera-feed");
 const overlayCanvas = document.querySelector("#overlay-canvas");
 const canvas = document.querySelector("#snapshot-canvas");
-const enrollAdminButton = document.querySelector("#enroll-admin");
 const cameraStatus = document.querySelector("#camera-status");
 const toggleVoiceButton = document.querySelector("#toggle-voice");
 const voiceStatus = document.querySelector("#voice-status");
@@ -232,6 +231,10 @@ const captureCurrentFrame = () => {
 
 const updateCameraStatus = (observation) => {
   if (!observation.face_count) {
+    if (observation.admin_learning_state === "uninitialized") {
+      cameraStatus.textContent = "No face detected yet. The first persistent face will become the admin baseline.";
+      return;
+    }
     cameraStatus.textContent = `No face detected. Brightness: ${observation.brightness}`;
     return;
   }
@@ -243,7 +246,8 @@ const updateCameraStatus = (observation) => {
   }
 
   const label = primaryFace.identity === "admin" ? "Admin" : "Unknown";
-  cameraStatus.textContent = `${label} face. Confidence: ${primaryFace.confidence}, faces: ${observation.face_count}, brightness: ${observation.brightness}`;
+  cameraStatus.textContent =
+    `${label} face. Confidence: ${primaryFace.confidence}, faces: ${observation.face_count}, brightness: ${observation.brightness}, admin model: ${observation.admin_learning_state} (${observation.admin_sample_count} samples)`;
 };
 
 const drawFaceOverlay = (observation) => {
@@ -303,7 +307,8 @@ const startCamera = async () => {
     }
 
     video.srcObject = cameraStream;
-    cameraStatus.textContent = "Camera live. Capturing observations every 6 seconds.";
+    cameraStatus.textContent =
+      "Camera live. Capturing observations every 6 seconds and learning the admin identity over time.";
     video.addEventListener(
       "loadedmetadata",
       () => {
@@ -440,34 +445,6 @@ const startMicMeter = async (stream) => {
   };
 
   tick();
-};
-
-const enrollAdmin = async () => {
-  if (!cameraStream) {
-    await startCamera();
-  }
-  await waitForVideoFrame();
-  const imageDataUrl = captureCurrentFrame();
-  if (!imageDataUrl) {
-    cameraStatus.textContent = "Waiting for the camera feed before enrolling the admin face.";
-    return;
-  }
-
-  const response = await fetchJson("/api/vision/enroll", {
-    method: "POST",
-    body: JSON.stringify({ image_data_url: imageDataUrl }),
-  });
-
-  cameraStatus.textContent = response.message || response.detail || "Admin enrollment failed.";
-  if (response.face) {
-    const frameWidth = video.videoWidth || 1;
-    const frameHeight = video.videoHeight || 1;
-    drawFaceOverlay({
-      faces: [response.face],
-      frame_width: frameWidth,
-      frame_height: frameHeight,
-    });
-  }
 };
 
 const createSpeechRecognition = () => {
@@ -703,7 +680,6 @@ runEvolutionButton.addEventListener("click", async () => {
 });
 
 refreshButton.addEventListener("click", refreshState);
-enrollAdminButton.addEventListener("click", enrollAdmin);
 toggleVoiceButton.addEventListener("click", toggleVoiceMode);
 
 contextForm.addEventListener("submit", async (event) => {
