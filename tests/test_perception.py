@@ -51,3 +51,26 @@ def test_confident_admin_match_updates_profile_over_time(tmp_path):
     assert observation["admin_sample_count"] == 3
     assert observation["admin_learning_state"] == "learning"
     assert observation["faces"][0]["identity"] == "admin"
+
+
+def test_live_observation_can_skip_snapshot_persistence(tmp_path):
+    service = PerceptionService(tmp_path / "snapshots", tmp_path / "admin_face.npy")
+    service._detector = FakeDetector([(10, 20, 60, 60)])
+    service._decode_data_url = lambda _data: np.zeros((160, 160, 3), dtype=np.uint8)
+    service._face_embedding = lambda _gray, _face: np.array([1.0, 0.0], dtype=np.float32)
+
+    calls = {"count": 0}
+
+    def fake_save_snapshot(_image):
+        calls["count"] += 1
+        return "snapshot.jpg"
+
+    service._save_snapshot = fake_save_snapshot
+
+    observation = service.analyze_snapshot(
+        "data:image/jpeg;base64,ignored",
+        persist_snapshot=False,
+    )
+
+    assert observation["image_path"] is None
+    assert calls["count"] == 0

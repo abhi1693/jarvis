@@ -33,6 +33,7 @@ class InteractionRequest(BaseModel):
 class ObservationRequest(BaseModel):
     image_data_url: str | None = None
     note: str | None = None
+    persist: bool = True
 
 
 class ProfileRequest(BaseModel):

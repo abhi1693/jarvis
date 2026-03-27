@@ -38,6 +38,11 @@ let micMeterFrame = null;
 let audioContext = null;
 let analyserNode = null;
 let mediaStreamSource = null;
+let observationRequestInFlight = false;
+let lastPersistedObservationAt = 0;
+
+const OBSERVATION_INTERVAL_MS = 750;
+const PERSISTED_OBSERVATION_INTERVAL_MS = 5000;
 
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -196,25 +201,64 @@ const waitForVideoFrame = () =>
     video.addEventListener("loadedmetadata", resolve, { once: true });
   });
 
-const captureObservation = async () => {
+const clearObservationTimer = () => {
+  if (!observationTimer) return;
+  window.clearTimeout(observationTimer);
+  observationTimer = null;
+};
+
+const scheduleNextObservation = (delay = OBSERVATION_INTERVAL_MS) => {
+  clearObservationTimer();
   if (!cameraStream) return;
+  observationTimer = window.setTimeout(runObservationLoop, delay);
+};
+
+const captureObservation = async ({ persist = false, refresh = false } = {}) => {
+  if (!cameraStream || observationRequestInFlight) return null;
   const imageDataUrl = captureCurrentFrame();
-  if (!imageDataUrl) return;
+  if (!imageDataUrl) return null;
 
-  const observation = await fetchJson("/api/observe", {
-    method: "POST",
-    body: JSON.stringify({ image_data_url: imageDataUrl }),
-  });
+  observationRequestInFlight = true;
+  try {
+    const observation = await fetchJson("/api/observe", {
+      method: "POST",
+      body: JSON.stringify({ image_data_url: imageDataUrl, persist }),
+    });
 
-  if (observation.detail) {
-    cameraStatus.textContent = observation.detail;
-    return;
+    if (observation.detail) {
+      cameraStatus.textContent = observation.detail;
+      return observation;
+    }
+
+    lastObservation = observation;
+    drawFaceOverlay(observation);
+    updateCameraStatus(observation);
+    if (refresh) {
+      await refreshState();
+    }
+    return observation;
+  } catch (_error) {
+    cameraStatus.textContent = "Camera live, but face detection sync failed. Retrying...";
+    return null;
+  } finally {
+    observationRequestInFlight = false;
+  }
+};
+
+const runObservationLoop = async () => {
+  if (!cameraStream) return;
+
+  const startedAt = performance.now();
+  const shouldPersist =
+    !lastPersistedObservationAt ||
+    Date.now() - lastPersistedObservationAt >= PERSISTED_OBSERVATION_INTERVAL_MS;
+  const observation = await captureObservation({ persist: shouldPersist, refresh: shouldPersist });
+  if (shouldPersist && observation && !observation.detail) {
+    lastPersistedObservationAt = Date.now();
   }
 
-  lastObservation = observation;
-  drawFaceOverlay(observation);
-  updateCameraStatus(observation);
-  await refreshState();
+  const elapsed = performance.now() - startedAt;
+  scheduleNextObservation(Math.max(OBSERVATION_INTERVAL_MS - elapsed, 0));
 };
 
 const captureCurrentFrame = () => {
@@ -308,7 +352,7 @@ const startCamera = async () => {
 
     video.srcObject = cameraStream;
     cameraStatus.textContent =
-      "Camera live. Capturing observations every 6 seconds and learning the admin identity over time.";
+      "Camera live. Analyzing faces in near realtime and persisting periodic samples while the admin model learns.";
     video.addEventListener(
       "loadedmetadata",
       () => {
@@ -316,10 +360,11 @@ const startCamera = async () => {
       },
       { once: true }
     );
-    clearInterval(observationTimer);
-    observationTimer = setInterval(captureObservation, 6000);
+    lastPersistedObservationAt = 0;
+    clearObservationTimer();
     await waitForVideoFrame();
-    await captureObservation();
+    await captureObservation({ persist: true, refresh: true });
+    scheduleNextObservation();
     return cameraStream;
   })();
 

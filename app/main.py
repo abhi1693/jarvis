@@ -138,36 +138,43 @@ async def chat_alias(payload: InteractionRequest) -> dict[str, object]:
 @app.post("/api/observe")
 async def observe(payload: ObservationRequest) -> dict[str, object]:
     try:
-        observation = perception_service.analyze_snapshot(payload.image_data_url, payload.note)
+        observation = perception_service.analyze_snapshot(
+            payload.image_data_url,
+            payload.note,
+            persist_snapshot=payload.persist,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    observation_id = memory_store.store_observation(
-        admin_present=observation["admin_present"],
-        face_count=observation["face_count"],
-        brightness=observation["brightness"],
-        note=observation["note"],
-        image_path=observation["image_path"],
-    )
-    summary = (
-        payload.note.strip()
-        if payload.note
-        else (
-            f"camera observation: present={observation['admin_present']}, "
-            f"admin={observation['admin_detected']}, faces={observation['face_count']}, "
-            f"brightness={observation['brightness']}"
+    if payload.persist:
+        observation_id = memory_store.store_observation(
+            admin_present=observation["admin_present"],
+            face_count=observation["face_count"],
+            brightness=observation["brightness"],
+            note=observation["note"],
+            image_path=observation["image_path"],
         )
-    )
-    memory_store.record_interaction(
-        "sensor",
-        summary,
-        "observe",
-        modality="camera",
-        channel="sensor",
-        metadata=observation,
-        media_path=observation["image_path"],
-    )
-    observation["id"] = observation_id
+        summary = (
+            payload.note.strip()
+            if payload.note
+            else (
+                f"camera observation: present={observation['admin_present']}, "
+                f"admin={observation['admin_detected']}, faces={observation['face_count']}, "
+                f"brightness={observation['brightness']}"
+            )
+        )
+        memory_store.record_interaction(
+            "sensor",
+            summary,
+            "observe",
+            modality="camera",
+            channel="sensor",
+            metadata=observation,
+            media_path=observation["image_path"],
+        )
+        observation["id"] = observation_id
+    else:
+        observation["id"] = None
     return observation
 
 

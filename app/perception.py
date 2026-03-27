@@ -19,7 +19,12 @@ class PerceptionService:
         self._admin_metadata_path = admin_face_path.with_suffix(".json")
         self._admin_embedding, self._admin_sample_count = self._load_admin_profile()
 
-    def analyze_snapshot(self, image_data_url: str | None, note: str | None = None) -> dict[str, Any]:
+    def analyze_snapshot(
+        self,
+        image_data_url: str | None,
+        note: str | None = None,
+        persist_snapshot: bool = True,
+    ) -> dict[str, Any]:
         if not image_data_url:
             return self._empty_observation(note)
 
@@ -28,7 +33,7 @@ class PerceptionService:
         detections = self._detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
         faces = [tuple(map(int, face)) for face in detections]
         brightness = float(np.mean(gray))
-        image_path = self._save_snapshot(image)
+        image_path = self._save_snapshot(image) if persist_snapshot else None
 
         bootstrapped = False
         if self._admin_embedding is None and faces:
