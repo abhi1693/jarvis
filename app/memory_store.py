@@ -3,13 +3,45 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 class MemoryStore:
+    _CONTEXT_CATEGORIES = (
+        "charter",
+        "constraint",
+        "interaction_style",
+        "relationship",
+        "objective",
+        "person",
+        "preference",
+        "state",
+        "context",
+        "note",
+    )
+    _PERSONA_CATEGORIES = {
+        "charter",
+        "constraint",
+        "interaction_style",
+        "objective",
+        "person",
+        "preference",
+        "relationship",
+    }
+    _WORKING_MEMORY_CATEGORIES = {"context", "experience", "note", "state"}
+
     def __init__(self, db_path: Path):
         self._db_path = db_path
+        self._knowledge_root = db_path.parent / "agent_memory"
+        self._memory_root = self._knowledge_root / "memories"
+        self._persona_root = self._memory_root / "persona"
+        self._working_root = self._memory_root / "working"
+        self._long_term_root = self._memory_root / "long_term"
+        self._skill_root = self._knowledge_root / "skills"
+        self._insight_root = self._knowledge_root / "insights"
         self._initialise()
 
     def record_interaction(
@@ -65,97 +97,62 @@ class MemoryStore:
         valid_from: str | None = None,
         valid_until: str | None = None,
     ) -> int:
-        tag_json = json.dumps(tags or [])
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO memories(category, title, content, tags_json, source, confidence, valid_from, valid_until)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (category, title, content, tag_json, source, confidence, valid_from, valid_until),
-            )
-            connection.execute(
-                """
-                INSERT INTO memory_fts(rowid, title, content, tags)
-                VALUES(?, ?, ?, ?)
-                """,
-                (cursor.lastrowid, title, content, " ".join(tags or [])),
-            )
-            return int(cursor.lastrowid)
+        record_id = self._new_record_id()
+        created_at = self._now_timestamp()
+        metadata = {
+            "id": record_id,
+            "category": category,
+            "title": title,
+            "content": content,
+            "tags": tags or [],
+            "source": source,
+            "confidence": confidence,
+            "valid_from": valid_from,
+            "valid_until": valid_until,
+            "created_at": created_at,
+            "storage_bucket": self._memory_bucket(category),
+        }
+        target = self._memory_path(record_id, category, title, created_at)
+        body = f"# {title}\n\n{content}".strip() + "\n"
+        self._write_markdown_record(target, metadata, body)
+        return record_id
 
     def recall(self, query: str = "", category: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
-        sql = """
-            SELECT id, category, title, content, tags_json, source, confidence, valid_from, valid_until, created_at
-            FROM memories
-        """
-        params: list[Any] = []
-        clauses: list[str] = []
-        safe_query = self._build_safe_fts_query(query)
-
-        if safe_query:
-            sql = """
-                SELECT m.id, m.category, m.title, m.content, m.tags_json, m.source, m.confidence,
-                       m.valid_from, m.valid_until, m.created_at
-                FROM memory_fts f
-                JOIN memories m ON m.id = f.rowid
-            """
-            clauses.append("memory_fts MATCH ?")
-            params.append(safe_query)
-
+        records = self._load_memory_records()
         if category:
-            clauses.append(("m." if safe_query else "") + "category = ?")
-            params.append(category)
+            records = [record for record in records if record["category"] == category]
 
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
+        tokens = self._search_tokens(query)
+        if tokens:
+            scored = []
+            for record in records:
+                score = self._memory_match_score(record, tokens)
+                if score > 0:
+                    scored.append((score, record))
+            scored.sort(key=lambda item: (item[0], item[1]["created_at"], item[1]["id"]), reverse=True)
+            return [record for _, record in scored[:limit]]
 
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
-        params.append(limit)
-
-        with self._connect() as connection:
-            rows = connection.execute(sql, params).fetchall()
-
-        return [self._row_to_memory(row) for row in rows]
+        records.sort(key=lambda record: (record["created_at"], record["id"]), reverse=True)
+        return records[:limit]
 
     def list_recent_skills(self, limit: int = 6) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, name, description, trigger_hint, steps_json, success_count, created_at, last_used_at
-                FROM procedures
-                ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return [self._row_to_skill(row) for row in rows]
+        records = self._load_skill_records()
+        records.sort(
+            key=lambda record: (
+                record["last_used_at"] or record["created_at"],
+                record["created_at"],
+                record["id"],
+            ),
+            reverse=True,
+        )
+        return records[:limit]
 
     def list_context_memories(self, limit: int = 8) -> list[dict[str, Any]]:
-        categories = (
-            "charter",
-            "constraint",
-            "interaction_style",
-            "relationship",
-            "objective",
-            "person",
-            "preference",
-            "state",
-            "context",
-            "note",
-        )
-        placeholders = ", ".join("?" for _ in categories)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT id, category, title, content, tags_json, source, confidence, valid_from, valid_until, created_at
-                FROM memories
-                WHERE category IN ({placeholders})
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (*categories, limit),
-            ).fetchall()
-        return [self._row_to_memory(row) for row in rows]
+        records = [
+            record for record in self._load_memory_records() if record["category"] in self._CONTEXT_CATEGORIES
+        ]
+        records.sort(key=lambda record: (record["created_at"], record["id"]), reverse=True)
+        return records[:limit]
 
     def store_skill(
         self,
@@ -165,30 +162,23 @@ class MemoryStore:
         trigger_hint: str,
         steps: list[dict[str, Any]],
     ) -> int:
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT id, success_count FROM procedures WHERE name = ? AND trigger_hint = ?",
-                (name, trigger_hint),
-            ).fetchone()
-            if existing:
-                connection.execute(
-                    """
-                    UPDATE procedures
-                    SET description = ?, steps_json = ?, success_count = ?, last_used_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (description, json.dumps(steps), existing["success_count"] + 1, existing["id"]),
-                )
-                return int(existing["id"])
-
-            cursor = connection.execute(
-                """
-                INSERT INTO procedures(name, description, trigger_hint, steps_json, success_count)
-                VALUES(?, ?, ?, ?, 1)
-                """,
-                (name, description, trigger_hint, json.dumps(steps)),
-            )
-            return int(cursor.lastrowid)
+        target = self._skill_root / f"{self._slugify(trigger_hint)}--{self._slugify(name)}.md"
+        existing = self._read_markdown_metadata(target) if target.exists() else {}
+        timestamp = self._now_timestamp()
+        metadata = {
+            "id": int(existing.get("id") or self._new_record_id()),
+            "name": name,
+            "description": description,
+            "trigger_hint": trigger_hint,
+            "steps": steps,
+            "success_count": int(existing.get("success_count", 0)) + 1,
+            "created_at": existing.get("created_at") or timestamp,
+            "last_used_at": timestamp if existing else None,
+        }
+        step_lines = "\n".join(f"- `{json.dumps(step, sort_keys=True)}`" for step in steps) or "- none"
+        body = f"# {name}\n\n{description}\n\n## Steps\n{step_lines}\n"
+        self._write_markdown_record(target, metadata, body)
+        return int(metadata["id"])
 
     def store_observation(
         self,
@@ -242,45 +232,54 @@ class MemoryStore:
         line_number: int | None = None,
         status: str = "open",
     ) -> int:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO code_findings(severity, source, title, details, file_path, line_number, status)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (severity, source, title, details, file_path, line_number, status),
-            )
-            return int(cursor.lastrowid)
+        record_id = self._new_record_id()
+        created_at = self._now_timestamp()
+        metadata = {
+            "id": record_id,
+            "severity": severity,
+            "source": source,
+            "title": title,
+            "details": details,
+            "file_path": file_path,
+            "line_number": line_number,
+            "status": status,
+            "created_at": created_at,
+        }
+        target = self._insight_path(record_id, title, created_at)
+        body = f"# {title}\n\n{details}".strip() + "\n"
+        self._write_markdown_record(target, metadata, body)
+        return record_id
 
     def list_recent_insights(self, limit: int = 8) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, severity, source, title, details, file_path, line_number, status, created_at
-                FROM code_findings
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        records = self._load_insight_records()
+        records.sort(key=lambda record: (record["created_at"], record["id"]), reverse=True)
+        return records[:limit]
 
     def get_memory_counts(self) -> dict[str, int]:
         with self._connect() as connection:
-            tables = {
-                "memories": "SELECT COUNT(*) AS value FROM memories",
-                "skills": "SELECT COUNT(*) AS value FROM procedures",
-                "observations": "SELECT COUNT(*) AS value FROM observations",
-                "insights": "SELECT COUNT(*) AS value FROM code_findings",
-                "interactions": "SELECT COUNT(*) AS value FROM interactions",
+            counts = {
+                "observations": int(connection.execute("SELECT COUNT(*) AS value FROM observations").fetchone()["value"]),
+                "interactions": int(connection.execute("SELECT COUNT(*) AS value FROM interactions").fetchone()["value"]),
             }
-            return {
-                name: int(connection.execute(query).fetchone()["value"])
-                for name, query in tables.items()
-            }
+
+        counts["memories"] = len(self._load_memory_records())
+        counts["skills"] = len(self._load_skill_records())
+        counts["insights"] = len(self._load_insight_records())
+        return counts
 
     def _initialise(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in (
+            self._knowledge_root,
+            self._memory_root,
+            self._persona_root,
+            self._working_root,
+            self._long_term_root,
+            self._skill_root,
+            self._insight_root,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -298,36 +297,6 @@ class MemoryStore:
                     intent
                 );
 
-                CREATE TABLE IF NOT EXISTS memories(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    tags_json TEXT NOT NULL DEFAULT '[]',
-                    source TEXT NOT NULL DEFAULT 'system',
-                    confidence REAL NOT NULL DEFAULT 0.8,
-                    valid_from TEXT,
-                    valid_until TEXT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-                    title,
-                    content,
-                    tags
-                );
-
-                CREATE TABLE IF NOT EXISTS procedures(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    trigger_hint TEXT NOT NULL,
-                    steps_json TEXT NOT NULL,
-                    success_count INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    last_used_at TEXT
-                );
-
                 CREATE TABLE IF NOT EXISTS observations(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     admin_present INTEGER NOT NULL,
@@ -337,24 +306,13 @@ class MemoryStore:
                     image_path TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
-
-                CREATE TABLE IF NOT EXISTS code_findings(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    severity TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    details TEXT NOT NULL,
-                    file_path TEXT,
-                    line_number INTEGER,
-                    status TEXT NOT NULL DEFAULT 'open',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
                 """
             )
             self._ensure_column(connection, "interactions", "modality", "TEXT NOT NULL DEFAULT 'text'")
             self._ensure_column(connection, "interactions", "channel", "TEXT NOT NULL DEFAULT 'ui'")
             self._ensure_column(connection, "interactions", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(connection, "interactions", "media_path", "TEXT")
+            self._migrate_legacy_knowledge_to_markdown(connection)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._db_path)
@@ -362,38 +320,266 @@ class MemoryStore:
         return connection
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-        columns = {
-            row["name"]
-            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-        }
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def _row_to_memory(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _migrate_legacy_knowledge_to_markdown(self, connection: sqlite3.Connection) -> None:
+        if self._table_exists(connection, "memories"):
+            rows = connection.execute(
+                """
+                SELECT id, category, title, content, tags_json, source, confidence, valid_from, valid_until, created_at
+                FROM memories
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+            for row in rows:
+                created_at = self._normalize_timestamp(row["created_at"])
+                target = self._memory_path(int(row["id"]), row["category"], row["title"], created_at)
+                if target.exists():
+                    continue
+                metadata = {
+                    "id": int(row["id"]),
+                    "category": row["category"],
+                    "title": row["title"],
+                    "content": row["content"],
+                    "tags": json.loads(row["tags_json"] or "[]"),
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                    "valid_from": row["valid_from"],
+                    "valid_until": row["valid_until"],
+                    "created_at": created_at,
+                    "storage_bucket": self._memory_bucket(row["category"]),
+                }
+                body = f"# {row['title']}\n\n{row['content']}".strip() + "\n"
+                self._write_markdown_record(target, metadata, body)
+
+        if self._table_exists(connection, "procedures"):
+            rows = connection.execute(
+                """
+                SELECT id, name, description, trigger_hint, steps_json, success_count, created_at, last_used_at
+                FROM procedures
+                ORDER BY COALESCE(last_used_at, created_at) ASC, id ASC
+                """
+            ).fetchall()
+            for row in rows:
+                target = self._skill_root / f"{self._slugify(row['trigger_hint'])}--{self._slugify(row['name'])}.md"
+                if target.exists():
+                    continue
+                metadata = {
+                    "id": int(row["id"]),
+                    "name": row["name"],
+                    "description": row["description"],
+                    "trigger_hint": row["trigger_hint"],
+                    "steps": json.loads(row["steps_json"] or "[]"),
+                    "success_count": int(row["success_count"]),
+                    "created_at": self._normalize_timestamp(row["created_at"]),
+                    "last_used_at": self._normalize_timestamp(row["last_used_at"]),
+                }
+                step_lines = "\n".join(
+                    f"- `{json.dumps(step, sort_keys=True)}`" for step in metadata["steps"]
+                ) or "- none"
+                body = f"# {row['name']}\n\n{row['description']}\n\n## Steps\n{step_lines}\n"
+                self._write_markdown_record(target, metadata, body)
+
+        if self._table_exists(connection, "code_findings"):
+            rows = connection.execute(
+                """
+                SELECT id, severity, source, title, details, file_path, line_number, status, created_at
+                FROM code_findings
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+            for row in rows:
+                created_at = self._normalize_timestamp(row["created_at"])
+                target = self._insight_path(int(row["id"]), row["title"], created_at)
+                if target.exists():
+                    continue
+                metadata = {
+                    "id": int(row["id"]),
+                    "severity": row["severity"],
+                    "source": row["source"],
+                    "title": row["title"],
+                    "details": row["details"],
+                    "file_path": row["file_path"],
+                    "line_number": row["line_number"],
+                    "status": row["status"],
+                    "created_at": created_at,
+                }
+                body = f"# {row['title']}\n\n{row['details']}".strip() + "\n"
+                self._write_markdown_record(target, metadata, body)
+
+    def _table_exists(self, connection: sqlite3.Connection, table: str) -> bool:
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    def _load_memory_records(self) -> list[dict[str, Any]]:
+        records = []
+        for path in self._memory_root.rglob("*.md"):
+            metadata = self._read_markdown_metadata(path)
+            if not metadata:
+                continue
+            records.append(self._coerce_memory_record(metadata))
+        return records
+
+    def _load_skill_records(self) -> list[dict[str, Any]]:
+        records = []
+        for path in self._skill_root.glob("*.md"):
+            metadata = self._read_markdown_metadata(path)
+            if not metadata:
+                continue
+            records.append(
+                {
+                    "id": int(metadata["id"]),
+                    "name": metadata["name"],
+                    "description": metadata["description"],
+                    "trigger_hint": metadata["trigger_hint"],
+                    "steps": list(metadata.get("steps", [])),
+                    "success_count": int(metadata.get("success_count", 1)),
+                    "created_at": self._normalize_timestamp(metadata.get("created_at")),
+                    "last_used_at": self._normalize_timestamp(metadata.get("last_used_at")),
+                }
+            )
+        return records
+
+    def _load_insight_records(self) -> list[dict[str, Any]]:
+        records = []
+        for path in self._insight_root.glob("*.md"):
+            metadata = self._read_markdown_metadata(path)
+            if not metadata:
+                continue
+            records.append(
+                {
+                    "id": int(metadata["id"]),
+                    "severity": metadata["severity"],
+                    "source": metadata["source"],
+                    "title": metadata["title"],
+                    "details": metadata["details"],
+                    "file_path": metadata.get("file_path"),
+                    "line_number": metadata.get("line_number"),
+                    "status": metadata.get("status", "open"),
+                    "created_at": self._normalize_timestamp(metadata.get("created_at")),
+                }
+            )
+        return records
+
+    def _coerce_memory_record(self, metadata: dict[str, Any]) -> dict[str, Any]:
         return {
-            "id": row["id"],
-            "category": row["category"],
-            "title": row["title"],
-            "content": row["content"],
-            "tags": json.loads(row["tags_json"] or "[]"),
-            "source": row["source"],
-            "confidence": row["confidence"],
-            "valid_from": row["valid_from"],
-            "valid_until": row["valid_until"],
-            "created_at": row["created_at"],
+            "id": int(metadata["id"]),
+            "category": metadata["category"],
+            "title": metadata["title"],
+            "content": metadata["content"],
+            "tags": list(metadata.get("tags", [])),
+            "source": metadata.get("source", "system"),
+            "confidence": float(metadata.get("confidence", 0.8)),
+            "valid_from": metadata.get("valid_from"),
+            "valid_until": metadata.get("valid_until"),
+            "created_at": self._normalize_timestamp(metadata.get("created_at")),
         }
 
-    def _row_to_skill(self, row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "description": row["description"],
-            "trigger_hint": row["trigger_hint"],
-            "steps": json.loads(row["steps_json"]),
-            "success_count": row["success_count"],
-            "created_at": row["created_at"],
-            "last_used_at": row["last_used_at"],
+    def _write_markdown_record(self, path: Path, metadata: dict[str, Any], body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["---"]
+        for key, value in metadata.items():
+            lines.append(f"{key}: {json.dumps(value, ensure_ascii=True)}")
+        lines.extend(["---", "", body.rstrip(), ""])
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _read_markdown_metadata(self, path: Path) -> dict[str, Any]:
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            return {}
+
+        remainder = text[4:]
+        frontmatter, separator, _body = remainder.partition("\n---\n")
+        if not separator:
+            return {}
+
+        metadata: dict[str, Any] = {}
+        for line in frontmatter.splitlines():
+            if not line.strip():
+                continue
+            key, separator, raw = line.partition(": ")
+            if not separator:
+                continue
+            metadata[key] = json.loads(raw) if raw else None
+        return metadata
+
+    def _memory_match_score(self, record: dict[str, Any], tokens: list[str]) -> int:
+        haystack = {
+            "title": record["title"].lower(),
+            "content": record["content"].lower(),
+            "category": record["category"].lower(),
+            "tags": " ".join(tag.lower() for tag in record.get("tags", [])),
         }
+        score = 0
+        for token in tokens:
+            if token in haystack["title"]:
+                score += 4
+            if token in haystack["tags"]:
+                score += 3
+            if token in haystack["category"]:
+                score += 2
+            if token in haystack["content"]:
+                score += 1
+        return score
+
+    def _memory_bucket(self, category: str) -> str:
+        if category in self._PERSONA_CATEGORIES:
+            return "persona"
+        if category in self._WORKING_MEMORY_CATEGORIES:
+            return "working"
+        return "long_term"
+
+    def _memory_directory(self, category: str) -> Path:
+        bucket = self._memory_bucket(category)
+        if bucket == "persona":
+            return self._persona_root
+        if bucket == "working":
+            return self._working_root
+        return self._long_term_root
+
+    def _memory_path(self, record_id: int, category: str, title: str, created_at: str) -> Path:
+        slug = self._slugify(title or category)
+        timestamp = self._timestamp_slug(created_at)
+        return self._memory_directory(category) / f"{timestamp}-{record_id}-{slug}.md"
+
+    def _insight_path(self, record_id: int, title: str, created_at: str) -> Path:
+        slug = self._slugify(title)
+        timestamp = self._timestamp_slug(created_at)
+        return self._insight_root / f"{timestamp}-{record_id}-{slug}.md"
+
+    def _now_timestamp(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _normalize_timestamp(self, value: Any) -> str | None:
+        if value in {None, ""}:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    def _new_record_id(self) -> int:
+        return time.time_ns() // 1_000
+
+    def _timestamp_slug(self, created_at: str | None) -> str:
+        normalized = self._normalize_timestamp(created_at) or self._now_timestamp()
+        return re.sub(r"[^0-9A-Za-z]+", "", normalized)
+
+    def _slugify(self, value: str) -> str:
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
+        return slug or "record"
 
     def _row_to_interaction(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -408,8 +594,5 @@ class MemoryStore:
             "created_at": row["created_at"],
         }
 
-    def _build_safe_fts_query(self, query: str) -> str:
-        tokens = re.findall(r"[A-Za-z0-9_]{2,}", query.lower())
-        if not tokens:
-            return ""
-        return " OR ".join(f'"{token}"' for token in tokens[:8])
+    def _search_tokens(self, query: str) -> list[str]:
+        return re.findall(r"[A-Za-z0-9_]{2,}", query.lower())[:8]
