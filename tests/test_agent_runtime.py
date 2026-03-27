@@ -106,8 +106,7 @@ def test_agent_runtime_discovers_skill_bundles_before_prompting_llm(tmp_path: Pa
     settings.brain_skill_source_dirs = (external_root,)
 
     llm = CapturingLLM()
-    store = MemoryStore(settings.db_path, settings.brain_root)
-    store.sync_external_skill_library(settings.brain_skill_source_dirs)
+    store = MemoryStore(settings.db_path, settings.brain_root, settings.brain_skill_source_dirs)
     fs_tool = FilesystemTool(settings.repo_root, settings.brain_root)
     brain = BrainService(settings, store, llm, fs_tool)
     agent = AgentRuntime(

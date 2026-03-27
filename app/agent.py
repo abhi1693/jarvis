@@ -559,8 +559,9 @@ class AgentRuntime:
             f"Use {relative_skill_dir} for brain-local skill files. "
             "You may create folders, write markdown notes and skills, and rearrange files there to organize memory. "
             "Skill discovery runs before each turn, so relevant skill files can be pulled into operating context automatically. "
-            f"Imported skills from well-known external directories are mirrored under {relative_imported_skill_dir}; "
-            "use them when relevant and read any sibling references or scripts they include."
+            "Imported skills from configured external directories are discovered directly at runtime, "
+            f"and optional mirrored caches may also appear under {relative_imported_skill_dir}. "
+            "Use them when relevant and read any sibling references or scripts they include."
         )
 
     def _assistant_persona_brief(self) -> str:

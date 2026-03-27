@@ -156,8 +156,7 @@ def test_brain_service_reads_imported_and_local_skill_files(tmp_path: Path):
     )
     settings.brain_skill_source_dirs = (external_root,)
 
-    store = MemoryStore(settings.db_path, settings.brain_root)
-    store.sync_external_skill_library(settings.brain_skill_source_dirs)
+    store = MemoryStore(settings.db_path, settings.brain_root, settings.brain_skill_source_dirs)
     fs_tool = FilesystemTool(settings.repo_root, settings.brain_root)
     fs_tool.write_file(
         "data/agent_brain/workspace/skills/release.md",
@@ -174,11 +173,8 @@ def test_brain_service_reads_imported_and_local_skill_files(tmp_path: Path):
 
     assert "python-helper" in prompt_context
     assert "Release Skill" in prompt_context
-    assert (settings.brain_root / "library" / "skills").exists()
-    assert (
-        settings.brain_root / "library" / "skills" / "codex-skills" / "python-helper" / "references" / "pytest.md"
-    ).exists()
-    assert (
+    assert "external/codex-skills/python-helper/SKILL.md" in prompt_context
+    assert not (
         settings.brain_root / "library" / "skills" / "codex-skills" / "python-helper" / "scripts" / "check.py"
     ).exists()
 

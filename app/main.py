@@ -34,7 +34,11 @@ from app.tools.web_search import WebSearchTool
 ADMIN_VISIBILITY_TTL_SECONDS = 2.0
 
 settings = get_settings()
-memory_store = MemoryStore(settings.db_path, settings.brain_root)
+memory_store = MemoryStore(
+    settings.db_path,
+    settings.brain_root,
+    settings.brain_skill_source_dirs,
+)
 llm_adapter = LLMAdapter(settings)
 intent_service = IntentService(llm_adapter)
 filesystem_tool = FilesystemTool(settings.repo_root, settings.brain_root)
@@ -79,7 +83,6 @@ async def _brain_maintenance_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
-    memory_store.sync_external_skill_library(settings.brain_skill_source_dirs)
     await brain_service.refresh(reason="startup", force=True)
     app_instance.state.brain_task = asyncio.create_task(_brain_maintenance_loop())
     try:
@@ -145,7 +148,12 @@ async def list_interactions() -> dict[str, object]:
 
 @app.post("/api/interactions")
 async def interact(payload: InteractionRequest) -> dict[str, object]:
-    text = (payload.message or payload.note or "").strip()
+    transcript_hint = str(
+        payload.metadata.get("transcript")
+        or payload.metadata.get("transcript_text")
+        or ""
+    ).strip()
+    text = (payload.message or payload.note or transcript_hint).strip()
     if not perception_service.admin_visible_recently(max_age_seconds=ADMIN_VISIBILITY_TTL_SECONDS):
         return {
             "message": "",
@@ -164,7 +172,13 @@ async def interact(payload: InteractionRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="Interaction requires text, note, or audio.")
 
     if not text and media_path:
-        text = "audio note captured without transcript"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Audio was received without a transcript. "
+                "Send message/note text with the audio or add a transcription step."
+            ),
+        )
 
     response = await agent.handle_interaction(
         text,

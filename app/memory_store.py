@@ -43,9 +43,17 @@ class MemoryStore:
         "- Keep the tone understated and elegant rather than theatrical.\n"
     )
 
-    def __init__(self, db_path: Path, brain_root: Path | None = None):
+    def __init__(
+        self,
+        db_path: Path,
+        brain_root: Path | None = None,
+        external_skill_source_dirs: tuple[Path, ...] | list[Path] = (),
+    ):
         self._db_path = db_path
         self._brain_root = (brain_root or (db_path.parent / "agent_brain")).resolve()
+        self._external_skill_source_dirs = tuple(
+            Path(item).expanduser().resolve() for item in external_skill_source_dirs
+        )
         self._workspace_root = self._brain_root / "workspace"
         self._workspace_skill_root = self._workspace_root / "skills"
         self._knowledge_root = self._brain_root / "knowledge"
@@ -952,8 +960,8 @@ class MemoryStore:
                 "- `workspace-map.md`: current tree of the freeform workspace.\n"
                 "- `workspace/`: freeform directory tree the agent can organize as needed.\n"
                 "- `workspace/skills/`: brain-local skill files created or maintained by the agent.\n"
-                "- `library/skills/`: imported skill directories mirrored from external skill libraries, "
-                "including supporting files alongside `SKILL.md`.",
+                "- `library/skills/`: optional mirrored caches of imported skill directories. "
+                "Configured external skill directories can also be consulted directly without mirroring.",
             ],
         )
         if not self._workspace_readme_path.exists():
@@ -1145,10 +1153,26 @@ class MemoryStore:
         bundles.extend(self._load_directory_skill_bundles(self._workspace_skill_root, "brain"))
         bundles.extend(self._load_standalone_workspace_skill_bundles())
         bundles.extend(self._load_directory_skill_bundles(self._skill_library_root, "imported"))
+        for external_root in self._external_skill_source_dirs:
+            bundles.extend(self._load_directory_skill_bundles(external_root, "external", external_root=external_root))
         bundles.sort(key=lambda item: (item["mtime"], item["root_path"]), reverse=True)
-        return bundles
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for bundle in bundles:
+            fingerprint = (bundle["name"].lower(), bundle["main_content"].strip().lower())
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            deduped.append(bundle)
+        return deduped
 
-    def _load_directory_skill_bundles(self, root: Path, source_label: str) -> list[dict[str, Any]]:
+    def _load_directory_skill_bundles(
+        self,
+        root: Path,
+        source_label: str,
+        *,
+        external_root: Path | None = None,
+    ) -> list[dict[str, Any]]:
         bundles: list[dict[str, Any]] = []
         if not root.exists():
             return bundles
@@ -1173,7 +1197,7 @@ class MemoryStore:
                     continue
                 support_files.append(
                     {
-                        "path": str(candidate.relative_to(self._brain_root)),
+                        "path": self._display_skill_path(candidate, external_root=external_root),
                         "content": content,
                         "mtime": candidate.stat().st_mtime,
                     }
@@ -1184,8 +1208,8 @@ class MemoryStore:
                 {
                     "name": skill_root.name,
                     "source": source_label,
-                    "root_path": str(skill_root.relative_to(self._brain_root)),
-                    "main_path": str(skill_file.relative_to(self._brain_root)),
+                    "root_path": self._display_skill_path(skill_root, external_root=external_root),
+                    "main_path": self._display_skill_path(skill_file, external_root=external_root),
                     "main_content": main_content,
                     "support_files": support_files,
                     "mtime": latest_mtime,
@@ -1230,10 +1254,10 @@ class MemoryStore:
     def _load_skill_reference_records(self) -> list[dict[str, Any]]:
         records = []
         sources = (
-            (self._workspace_skill_root, "brain"),
-            (self._skill_library_root, "imported"),
+            (self._workspace_skill_root, "brain", None),
+            (self._skill_library_root, "imported", None),
         )
-        for root, source_label in sources:
+        for root, source_label, external_root in sources:
             if not root.exists():
                 continue
             for path in root.rglob("*.md"):
@@ -1242,7 +1266,6 @@ class MemoryStore:
                 if source_label == "brain" and path.name == "README.md":
                     continue
                 content = path.read_text(encoding="utf-8").strip()
-                relative = path.relative_to(self._brain_root)
                 if path.name == "SKILL.md":
                     name = path.parent.name
                 else:
@@ -1250,14 +1273,38 @@ class MemoryStore:
                 records.append(
                     {
                         "name": name,
-                        "path": str(relative),
+                        "path": self._display_skill_path(path, external_root=external_root),
                         "source": source_label,
                         "content": content,
                         "mtime": path.stat().st_mtime,
                     }
                 )
+        for external_root in self._external_skill_source_dirs:
+            if not external_root.exists():
+                continue
+            for path in external_root.rglob("SKILL.md"):
+                if not path.is_file():
+                    continue
+                content = path.read_text(encoding="utf-8").strip()
+                records.append(
+                    {
+                        "name": path.parent.name,
+                        "path": self._display_skill_path(path, external_root=external_root),
+                        "source": "external",
+                        "content": content,
+                        "mtime": path.stat().st_mtime,
+                    }
+                )
         records.sort(key=lambda item: (item["mtime"], item["path"]), reverse=True)
-        return records
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for record in records:
+            fingerprint = (record["name"].lower(), record["content"].strip().lower())
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            deduped.append(record)
+        return deduped
 
     def _select_skill_reference_documents(
         self,
@@ -1332,6 +1379,12 @@ class MemoryStore:
             return path.read_text(encoding="utf-8").strip()
         except UnicodeDecodeError:
             return None
+
+    def _display_skill_path(self, path: Path, *, external_root: Path | None = None) -> str:
+        if external_root is not None:
+            label = self._slugify(f"{external_root.parent.name}-{external_root.name}")
+            return f"external/{label}/{path.relative_to(external_root)}"
+        return str(path.relative_to(self._brain_root))
 
     def _is_skill_support_file(self, path: Path) -> bool:
         return path.suffix.lower() in {
