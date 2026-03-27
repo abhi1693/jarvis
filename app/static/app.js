@@ -40,9 +40,15 @@ let analyserNode = null;
 let mediaStreamSource = null;
 let observationRequestInFlight = false;
 let lastPersistedObservationAt = 0;
+let currentAssistantSpeech = null;
+let resolveAssistantSpeech = null;
+let bargeInFrameCount = 0;
 
 const OBSERVATION_INTERVAL_MS = 750;
 const PERSISTED_OBSERVATION_INTERVAL_MS = 5000;
+const VOICE_TURN_SUBMIT_DELAY_MS = 850;
+const BARGE_IN_RMS_THRESHOLD = 0.06;
+const BARGE_IN_HOLD_FRAMES = 5;
 
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -379,6 +385,44 @@ const setMicLevel = (level = 0.04) => {
   micLevelBar.style.transform = `scaleX(${Math.max(0.04, Math.min(1, level))})`;
 };
 
+const queueVoiceTurnFlush = (delay = VOICE_TURN_SUBMIT_DELAY_MS) => {
+  clearTimeout(voiceSubmitTimer);
+  voiceSubmitTimer = window.setTimeout(flushVoiceTurn, delay);
+};
+
+const resetBargeInDetector = () => {
+  bargeInFrameCount = 0;
+};
+
+const finishAssistantSpeech = () => {
+  if (!resolveAssistantSpeech) return;
+  const resolve = resolveAssistantSpeech;
+  resolveAssistantSpeech = null;
+  currentAssistantSpeech = null;
+  resolve();
+};
+
+const interruptAssistantSpeech = (statusText = "Interrupted. Listening...") => {
+  if (
+    !voiceModeEnabled ||
+    voicePauseReason !== "speaking" ||
+    !("speechSynthesis" in window) ||
+    (!currentAssistantSpeech && !window.speechSynthesis.speaking)
+  ) {
+    return false;
+  }
+
+  resetBargeInDetector();
+  voicePauseReason = null;
+  voiceStatus.textContent = statusText;
+  syncVoiceUi();
+  updateTranscriptView();
+  window.speechSynthesis.cancel();
+  window.setTimeout(finishAssistantSpeech, 0);
+  startSpeechRecognition();
+  return true;
+};
+
 const updateMicBadge = (tone, label) => {
   micBadge.className = `pill mic-pill ${tone}`;
   micBadge.textContent = label;
@@ -486,6 +530,19 @@ const startMicMeter = async (stream) => {
     }
     const rms = Math.sqrt(sum / samples.length);
     setMicLevel(rms * 4.5);
+    if (voicePauseReason === "speaking") {
+      if (rms >= BARGE_IN_RMS_THRESHOLD) {
+        bargeInFrameCount += 1;
+      } else {
+        bargeInFrameCount = 0;
+      }
+
+      if (bargeInFrameCount >= BARGE_IN_HOLD_FRAMES) {
+        interruptAssistantSpeech();
+      }
+    } else {
+      resetBargeInDetector();
+    }
     micMeterFrame = requestAnimationFrame(tick);
   };
 
@@ -520,8 +577,7 @@ const createSpeechRecognition = () => {
     updateTranscriptView();
 
     if (finalTranscript) {
-      clearTimeout(voiceSubmitTimer);
-      voiceSubmitTimer = window.setTimeout(flushVoiceTurn, 850);
+      queueVoiceTurnFlush();
     }
   };
 
@@ -576,17 +632,29 @@ const speakAssistantReply = async (message) => {
   if (!voiceModeEnabled || !("speechSynthesis" in window) || !message) return;
 
   voicePauseReason = "speaking";
+  resetBargeInDetector();
   syncVoiceUi();
   updateTranscriptView();
   stopSpeechRecognition();
   window.speechSynthesis.cancel();
 
   await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolveAssistantSpeech = null;
+      currentAssistantSpeech = null;
+      resolve();
+    };
+
+    resolveAssistantSpeech = finish;
     const utterance = new SpeechSynthesisUtterance(message);
+    currentAssistantSpeech = utterance;
     utterance.rate = 1.02;
     utterance.pitch = 1;
-    utterance.onend = resolve;
-    utterance.onerror = resolve;
+    utterance.onend = finish;
+    utterance.onerror = finish;
     window.speechSynthesis.speak(utterance);
   });
 };
@@ -635,6 +703,9 @@ async function flushVoiceTurn() {
     updateTranscriptView();
     if (voiceModeEnabled) {
       startSpeechRecognition();
+      if (finalTranscript.trim()) {
+        queueVoiceTurnFlush(120);
+      }
     }
   }
 }
@@ -654,7 +725,14 @@ const startVoice = async () => {
   }
 
   try {
-    voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
   } catch (error) {
     voiceStatus.textContent = "Mic permission was blocked. Allow microphone access and try again.";
     return;
@@ -679,11 +757,13 @@ const stopVoice = async () => {
   voiceSubmitTimer = null;
   finalTranscript = "";
   interimTranscript = "";
+  resetBargeInDetector();
   stopSpeechRecognition();
 
   if ("speechSynthesis" in window) {
     window.speechSynthesis.cancel();
   }
+  finishAssistantSpeech();
 
   if (voiceStream) {
     voiceStream.getTracks().forEach((track) => track.stop());
