@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jarvis</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="panel hero">
+        <div>
+          <p class="eyebrow">Multimodal evolving agent</p>
+          <h1>Jarvis</h1>
+          <p class="lede">
+            A generic local-first system that learns from what you type, say, and show on camera,
+            then accumulates memory, habits, and reusable skills over time.
+          </p>
+        </div>
+        <div class="status-grid" id="status-grid"></div>
+      </section>
+
+      <section class="panel vision-panel">
+        <div class="panel-header">
+          <h2>Vision</h2>
+          <div class="actions">
+            <button id="enroll-admin" class="ghost">Enroll Admin</button>
+            <button id="start-camera">Start Camera</button>
+            <button id="stop-camera" class="ghost">Stop</button>
+          </div>
+        </div>
+        <div class="video-stage">
+          <video id="camera-feed" autoplay playsinline muted></video>
+          <canvas id="overlay-canvas" class="overlay-canvas"></canvas>
+        </div>
+        <canvas id="snapshot-canvas" hidden></canvas>
+        <p id="camera-status" class="muted">Camera idle.</p>
+      </section>
+
+      <section class="panel voice-panel">
+        <div class="panel-header">
+          <h2>Voice</h2>
+          <div class="actions">
+            <button id="start-voice">Start Voice</button>
+            <button id="stop-voice" class="ghost">Stop</button>
+          </div>
+        </div>
+        <div class="memory-card">
+          <span class="label">Transcript</span>
+          <p id="voice-transcript" class="transcript">No speech captured yet.</p>
+        </div>
+        <p id="voice-status" class="muted">
+          Uses browser speech recognition when available. Audio is still stored even if transcript
+          support is missing.
+        </p>
+      </section>
+
+      <section class="panel interaction-panel">
+        <div class="panel-header">
+          <h2>Text</h2>
+          <div class="actions">
+            <button id="run-evolution">Run Evolution Scan</button>
+            <button id="refresh-state" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <div id="chat-log" class="chat-log"></div>
+        <form id="chat-form" class="chat-form">
+          <textarea
+            id="chat-input"
+            rows="3"
+            placeholder="Speak naturally: ask it to remember something, reflect, search, build, plan, or use tools."
+          ></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </section>
+
+      <section class="panel profile-panel">
+        <div class="panel-header">
+          <h2>Profile Hints</h2>
+        </div>
+        <form id="profile-form" class="stack-form">
+          <input id="profile-name" placeholder="Name" />
+          <input id="profile-role" placeholder="Role" />
+          <input id="profile-goals" placeholder="Goals" />
+          <input id="profile-preferences" placeholder="Preferences" />
+          <button type="submit">Save Profile</button>
+        </form>
+      </section>
+
+      <section class="panel memory-panel">
+        <div class="panel-header">
+          <h2>Long-Term Memory</h2>
+        </div>
+        <div id="memory-list" class="memory-list"></div>
+      </section>
+
+      <section class="panel skill-panel">
+        <div class="panel-header">
+          <h2>Learned Skills</h2>
+        </div>
+        <div id="skill-list" class="memory-list"></div>
+      </section>
+
+      <section class="panel insight-panel">
+        <div class="panel-header">
+          <h2>Evolution Insights</h2>
+        </div>
+        <div id="insight-list" class="memory-list"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

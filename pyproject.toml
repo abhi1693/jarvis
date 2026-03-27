@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-local"
+version = "0.1.0"
+description = "Local-first, presence-aware coding assistant with memory and self-improvement primitives."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "duckduckgo-search>=6.1.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+  "numpy>=1.26.4",
+  "opencv-python-headless>=4.10.0.84",
+  "pydantic>=2.8.0",
+  "python-multipart>=0.0.9",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "ruff>=0.6.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+

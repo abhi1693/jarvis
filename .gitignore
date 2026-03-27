@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+.idea/
+data/*.db
+data/*.npy
+data/audio/
+data/snapshots/
+data/change_sets/
