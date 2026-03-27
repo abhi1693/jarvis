@@ -33,6 +33,7 @@ class BrainService:
         runtime_context: list[dict[str, Any]],
         recalled_memories: list[dict[str, Any]],
         skills: list[dict[str, Any]],
+        discovered_skills: list[dict[str, Any]] | None = None,
     ) -> str:
         brain = self._memory_store.get_brain_snapshot(
             query=query,
@@ -58,6 +59,25 @@ class BrainService:
                     f"- [{memory['category']}] {memory['title']}: {memory['content']}"
                     for memory in recalled_memories[:8]
                 )
+            )
+
+        active_skill_notes = []
+        for item in discovered_skills or []:
+            note = (
+                f"- {item['name']} [{item['source']}] root={item['root_path']} main={item['main_path']}\n"
+                f"{item['content']}"
+            )
+            support_files = item.get("support_files", [])
+            if support_files:
+                rendered_support = "\n".join(
+                    f"  - {file_item['path']}\n{file_item['content']}" for file_item in support_files
+                )
+                note += f"\nSupporting skill files:\n{rendered_support}"
+            active_skill_notes.append(note)
+        if active_skill_notes:
+            sections.append(
+                "Selected skill files for this turn:\n"
+                + "\n".join(active_skill_notes)
             )
 
         brain_sections = []
@@ -101,6 +121,21 @@ class BrainService:
             sections.append("Recent interaction trail:\n" + "\n".join(recent_interactions))
 
         return "\n\n".join(section for section in sections if section).strip() or "- no durable operating context yet"
+
+    def discover_skill_bundles(
+        self,
+        query: str,
+        *,
+        intent_name: str = "",
+        suggested_tools: list[str] | None = None,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        return self._memory_store.discover_skill_bundles(
+            query,
+            intent_name=intent_name,
+            suggested_tools=suggested_tools or [],
+            limit=limit,
+        )
 
     async def ingest_user_message(
         self,

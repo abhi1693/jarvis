@@ -69,11 +69,17 @@ class AgentRuntime:
         runtime_context = self._memory_store.list_context_memories(limit=8)
         recalled_memories = self._memory_store.recall(normalized_message, limit=self._settings.memory_recall_limit)
         skills = self._memory_store.list_recent_skills(limit=4)
+        discovered_skills = self._brain_service.discover_skill_bundles(
+            normalized_message,
+            intent_name=intent.name,
+            suggested_tools=intent.suggested_tools,
+        )
         prompt_context = self._brain_service.build_prompt_context(
             normalized_message,
             runtime_context,
             recalled_memories,
             skills,
+            discovered_skills=discovered_skills,
         )
 
         insights: list[dict[str, Any]] = []
@@ -320,6 +326,7 @@ class AgentRuntime:
                 system_prompt=(
                     f"{self._assistant_persona_brief()} "
                     "Your duties come from the operator-defined context, not a fixed product role. "
+                    "Selected skill files in the operating context are active instructions for this turn. "
                     "Help plan or create the requested thing while respecting that context. "
                     f"{self._brain_workspace_brief()}"
                 ),
@@ -348,6 +355,7 @@ class AgentRuntime:
                 system_prompt=(
                     f"{self._assistant_persona_brief()} "
                     "You are a repo-aware copilot inside an adaptive agent. "
+                    "Selected skill files in the operating context are active instructions for this turn. "
                     "Use the provided operating context, repository matches, and memories. "
                     "Do not invent files or code that were not supplied. "
                     f"{self._brain_workspace_brief()}"
@@ -394,6 +402,7 @@ class AgentRuntime:
                 system_prompt=(
                     f"{self._assistant_persona_brief()} "
                     "You do not have fixed duties: derive your role, priorities, and style from the current operating context. "
+                    "Selected skill files in the operating context are active instructions for this turn. "
                     "If the operator has not defined enough context, ask concise questions that help shape your role. "
                     "Keep the tone natural, poised, and human. "
                     f"{self._brain_workspace_brief()}"
@@ -549,6 +558,7 @@ class AgentRuntime:
             f"Use {relative_workspace} as your freeform external workspace. "
             f"Use {relative_skill_dir} for brain-local skill files. "
             "You may create folders, write markdown notes and skills, and rearrange files there to organize memory. "
+            "Skill discovery runs before each turn, so relevant skill files can be pulled into operating context automatically. "
             f"Imported skills from well-known external directories are mirrored under {relative_imported_skill_dir}; "
             "use them when relevant and read any sibling references or scripts they include."
         )

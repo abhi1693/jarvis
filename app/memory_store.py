@@ -412,6 +412,54 @@ class MemoryStore:
             "recent_skills": self.list_recent_skills(limit=6),
         }
 
+    def discover_skill_bundles(
+        self,
+        query: str,
+        *,
+        intent_name: str = "",
+        suggested_tools: list[str] | None = None,
+        limit: int = 3,
+        support_file_limit: int = 3,
+        max_chars: int = 1_200,
+    ) -> list[dict[str, Any]]:
+        search_text = " ".join(
+            part
+            for part in [query, intent_name, " ".join(suggested_tools or [])]
+            if str(part).strip()
+        )
+        tokens = self._search_tokens(search_text)
+        bundles = self._load_skill_bundle_records()
+        ranked: list[tuple[int, float, dict[str, Any]]] = []
+
+        for bundle in bundles:
+            ranked.append((self._score_skill_bundle(bundle, tokens), bundle["mtime"], bundle))
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]["name"]), reverse=True)
+        if tokens:
+            ranked = [item for item in ranked if item[0] > 0]
+
+        results: list[dict[str, Any]] = []
+        for _score, _mtime, bundle in ranked[:limit]:
+            support_files = []
+            for file_record in bundle["support_files"][:support_file_limit]:
+                support_files.append(
+                    {
+                        "path": file_record["path"],
+                        "content": file_record["content"][:max_chars],
+                    }
+                )
+            results.append(
+                {
+                    "name": bundle["name"],
+                    "source": bundle["source"],
+                    "root_path": bundle["root_path"],
+                    "main_path": bundle["main_path"],
+                    "content": bundle["main_content"][:max_chars],
+                    "support_files": support_files,
+                }
+            )
+        return results
+
     def sync_external_skill_library(self, source_dirs: tuple[Path, ...] | list[Path]) -> dict[str, Any]:
         imported = 0
         skipped = 0
@@ -1092,6 +1140,93 @@ class MemoryStore:
                 continue
             shutil.rmtree(candidate)
 
+    def _load_skill_bundle_records(self) -> list[dict[str, Any]]:
+        bundles: list[dict[str, Any]] = []
+        bundles.extend(self._load_directory_skill_bundles(self._workspace_skill_root, "brain"))
+        bundles.extend(self._load_standalone_workspace_skill_bundles())
+        bundles.extend(self._load_directory_skill_bundles(self._skill_library_root, "imported"))
+        bundles.sort(key=lambda item: (item["mtime"], item["root_path"]), reverse=True)
+        return bundles
+
+    def _load_directory_skill_bundles(self, root: Path, source_label: str) -> list[dict[str, Any]]:
+        bundles: list[dict[str, Any]] = []
+        if not root.exists():
+            return bundles
+
+        for skill_file in sorted(root.rglob("SKILL.md")):
+            if not skill_file.is_file():
+                continue
+            skill_root = skill_file.parent
+            main_content = self._read_text_file(skill_file)
+            if main_content is None:
+                continue
+
+            support_files = []
+            latest_mtime = skill_file.stat().st_mtime
+            for candidate in sorted(skill_root.rglob("*")):
+                if not candidate.is_file() or candidate == skill_file:
+                    continue
+                if not self._is_skill_support_file(candidate):
+                    continue
+                content = self._read_text_file(candidate)
+                if content is None:
+                    continue
+                support_files.append(
+                    {
+                        "path": str(candidate.relative_to(self._brain_root)),
+                        "content": content,
+                        "mtime": candidate.stat().st_mtime,
+                    }
+                )
+                latest_mtime = max(latest_mtime, candidate.stat().st_mtime)
+
+            bundles.append(
+                {
+                    "name": skill_root.name,
+                    "source": source_label,
+                    "root_path": str(skill_root.relative_to(self._brain_root)),
+                    "main_path": str(skill_file.relative_to(self._brain_root)),
+                    "main_content": main_content,
+                    "support_files": support_files,
+                    "mtime": latest_mtime,
+                }
+            )
+
+        return bundles
+
+    def _load_standalone_workspace_skill_bundles(self) -> list[dict[str, Any]]:
+        bundles: list[dict[str, Any]] = []
+        root = self._workspace_skill_root
+        if not root.exists():
+            return bundles
+
+        directory_skill_roots = {item.parent.resolve() for item in root.rglob("SKILL.md") if item.is_file()}
+        for candidate in sorted(root.rglob("*.md")):
+            if not candidate.is_file():
+                continue
+            if candidate.name in {"README.md", "SKILL.md"}:
+                continue
+            if any(parent in directory_skill_roots for parent in candidate.parents):
+                continue
+
+            content = self._read_text_file(candidate)
+            if content is None:
+                continue
+
+            bundles.append(
+                {
+                    "name": candidate.stem,
+                    "source": "brain",
+                    "root_path": str(candidate.relative_to(self._brain_root)),
+                    "main_path": str(candidate.relative_to(self._brain_root)),
+                    "main_content": content,
+                    "support_files": [],
+                    "mtime": candidate.stat().st_mtime,
+                }
+            )
+
+        return bundles
+
     def _load_skill_reference_records(self) -> list[dict[str, Any]]:
         records = []
         sources = (
@@ -1163,3 +1298,51 @@ class MemoryStore:
                 }
             )
         return results
+
+    def _score_skill_bundle(self, bundle: dict[str, Any], tokens: list[str]) -> int:
+        if not tokens:
+            return 0
+
+        lowered_name = bundle["name"].lower()
+        lowered_root_path = bundle["root_path"].lower()
+        lowered_main_path = bundle["main_path"].lower()
+        lowered_content = bundle["main_content"].lower()
+        score = 0
+
+        for token in tokens:
+            if token in lowered_name:
+                score += 10
+            if token in lowered_root_path:
+                score += 7
+            if token in lowered_main_path:
+                score += 8
+            if token in lowered_content:
+                score += 4
+
+            for support_file in bundle["support_files"]:
+                if token in support_file["path"].lower():
+                    score += 3
+                if token in support_file["content"].lower():
+                    score += 2
+
+        return score
+
+    def _read_text_file(self, path: Path) -> str | None:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            return None
+
+    def _is_skill_support_file(self, path: Path) -> bool:
+        return path.suffix.lower() in {
+            ".md",
+            ".txt",
+            ".py",
+            ".js",
+            ".ts",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".sh",
+        }
