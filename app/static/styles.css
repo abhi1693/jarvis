@@ -55,7 +55,7 @@ body {
 .vision-panel,
 .voice-panel,
 .interaction-panel,
-.profile-panel,
+.context-panel,
 .memory-panel,
 .skill-panel,
 .insight-panel {
@@ -312,7 +312,7 @@ button.ghost {
   .vision-panel,
   .voice-panel,
   .interaction-panel,
-  .profile-panel,
+  .context-panel,
   .memory-panel,
   .skill-panel,
   .insight-panel {
@@ -329,7 +329,7 @@ button.ghost {
   .vision-panel,
   .voice-panel,
   .interaction-panel,
-  .profile-panel,
+  .context-panel,
   .memory-panel,
   .skill-panel,
   .insight-panel {

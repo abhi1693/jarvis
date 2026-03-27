@@ -7,10 +7,10 @@ def test_memory_store_round_trip(tmp_path: Path):
     store = MemoryStore(tmp_path / "jarvis.db")
 
     store.store_memory(
-        category="profile",
+        category="person",
         title="name",
         content="Asha",
-        tags=["person", "profile"],
+        tags=["person"],
     )
     store.store_skill(
         name="Creation skill",
@@ -35,3 +35,31 @@ def test_memory_store_round_trip(tmp_path: Path):
     assert skills[0]["trigger_hint"] == "create"
     assert interactions[0]["modality"] == "audio"
     assert counts["memories"] == 1
+
+
+def test_memory_store_returns_runtime_context(tmp_path: Path):
+    store = MemoryStore(tmp_path / "jarvis.db")
+
+    store.store_memory(
+        category="charter",
+        title="duty",
+        content="Adapt to operator priorities over time.",
+        tags=["charter", "duty"],
+    )
+    store.store_memory(
+        category="preference",
+        title="preference",
+        content="Keep replies concise.",
+        tags=["preference"],
+    )
+    store.store_memory(
+        category="experience",
+        title="interaction",
+        content="A transient interaction log.",
+        tags=["experience"],
+    )
+
+    context = store.list_context_memories(limit=10)
+
+    assert len(context) == 2
+    assert {item["category"] for item in context} == {"charter", "preference"}

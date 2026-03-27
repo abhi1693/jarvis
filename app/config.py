@@ -34,7 +34,7 @@ def get_settings() -> Settings:
     repo_root = Path(__file__).resolve().parents[1]
     data_dir = repo_root / "data"
     settings = Settings(
-        app_name="Jarvis",
+        app_name=os.getenv("AGENT_NAME", "Adaptive Agent"),
         repo_root=repo_root,
         data_dir=data_dir,
         db_path=data_dir / "jarvis.db",

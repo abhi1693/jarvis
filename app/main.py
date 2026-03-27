@@ -75,6 +75,7 @@ async def get_state() -> SystemStateResponse:
         llm_enabled=settings.llm_enabled,
         repo_root=str(settings.repo_root),
         memory_counts=memory_store.get_memory_counts(),
+        runtime_context=memory_store.list_context_memories(limit=6),
         recent_memories=memory_store.recall(limit=6),
         recent_skills=memory_store.list_recent_skills(limit=6),
         recent_insights=memory_store.list_recent_insights(limit=6),

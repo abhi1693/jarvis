@@ -130,6 +130,33 @@ class MemoryStore:
             ).fetchall()
         return [self._row_to_skill(row) for row in rows]
 
+    def list_context_memories(self, limit: int = 8) -> list[dict[str, Any]]:
+        categories = (
+            "charter",
+            "constraint",
+            "interaction_style",
+            "relationship",
+            "objective",
+            "person",
+            "preference",
+            "state",
+            "context",
+            "note",
+        )
+        placeholders = ", ".join("?" for _ in categories)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, category, title, content, tags_json, source, confidence, valid_from, valid_until, created_at
+                FROM memories
+                WHERE category IN ({placeholders})
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*categories, limit),
+            ).fetchall()
+        return [self._row_to_memory(row) for row in rows]
+
     def store_skill(
         self,
         *,

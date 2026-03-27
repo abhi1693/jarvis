@@ -3,18 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Jarvis</title>
+    <title>Adaptive Agent</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <main class="app-shell">
       <section class="panel hero">
         <div>
-          <p class="eyebrow">Multimodal evolving agent</p>
-          <h1>Jarvis</h1>
+          <p class="eyebrow">Operator-shaped local agent</p>
+          <h1 id="app-name">Adaptive Agent</h1>
           <p class="lede">
-            A generic local-first system that learns from what you type, say, and show on camera,
-            then accumulates memory, habits, and reusable skills over time.
+            No fixed duties are baked in. Define what this system should become through text,
+            voice, and observed behavior, and it will accumulate that context into its operating
+            memory over time.
           </p>
         </div>
         <div class="status-grid" id="status-grid"></div>
@@ -73,23 +74,25 @@
           <textarea
             id="chat-input"
             rows="3"
-            placeholder="Speak naturally: ask it to remember something, reflect, search, build, plan, or use tools."
+            placeholder="Give it work, correct its role, define constraints, or tell it what to learn from you."
           ></textarea>
           <button type="submit">Send</button>
         </form>
       </section>
 
-      <section class="panel profile-panel">
+      <section class="panel context-panel">
         <div class="panel-header">
-          <h2>Profile Hints</h2>
+          <h2>Operating Context</h2>
         </div>
-        <form id="profile-form" class="stack-form">
-          <input id="profile-name" placeholder="Name" />
-          <input id="profile-role" placeholder="Role" />
-          <input id="profile-goals" placeholder="Goals" />
-          <input id="profile-preferences" placeholder="Preferences" />
-          <button type="submit">Save Profile</button>
+        <form id="context-form" class="stack-form">
+          <textarea
+            id="context-input"
+            rows="6"
+            placeholder="Describe the duties, boundaries, priorities, collaboration style, and what this system should learn from you."
+          ></textarea>
+          <button type="submit">Update Context</button>
         </form>
+        <div id="context-list" class="memory-list"></div>
       </section>
 
       <section class="panel memory-panel">

@@ -6,11 +6,20 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class MemoryCandidate(BaseModel):
+    category: str
+    title: str
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = 0.8
+
+
 class IntentResult(BaseModel):
     name: str
     confidence: float = 0.0
     extracted_facts: dict[str, str] = Field(default_factory=dict)
     suggested_tools: list[str] = Field(default_factory=list)
+    memory_candidates: list[MemoryCandidate] = Field(default_factory=list)
 
 
 class InteractionRequest(BaseModel):
@@ -111,6 +120,7 @@ class SystemStateResponse(BaseModel):
     llm_enabled: bool
     repo_root: str
     memory_counts: dict[str, int]
+    runtime_context: list[MemoryRecord]
     recent_memories: list[MemoryRecord]
     recent_skills: list[SkillRecord]
     recent_insights: list[EvolutionInsightRecord]

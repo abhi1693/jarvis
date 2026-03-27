@@ -7,7 +7,10 @@ const chatForm = document.querySelector("#chat-form");
 const chatInput = document.querySelector("#chat-input");
 const runEvolutionButton = document.querySelector("#run-evolution");
 const refreshButton = document.querySelector("#refresh-state");
-const profileForm = document.querySelector("#profile-form");
+const appNameHeading = document.querySelector("#app-name");
+const contextForm = document.querySelector("#context-form");
+const contextInput = document.querySelector("#context-input");
+const contextList = document.querySelector("#context-list");
 const video = document.querySelector("#camera-feed");
 const overlayCanvas = document.querySelector("#overlay-canvas");
 const canvas = document.querySelector("#snapshot-canvas");
@@ -106,10 +109,16 @@ const renderInteractionFeed = (interactions) => {
 };
 
 const renderState = (state) => {
+  if (state.app_name) {
+    appNameHeading.textContent = state.app_name;
+    document.title = state.app_name;
+  }
+
   const cards = [
     { label: "LLM", value: state.llm_enabled ? "Connected" : "Fallback only" },
     { label: "Interactions", value: state.memory_counts.interactions },
     { label: "Memories", value: state.memory_counts.memories },
+    { label: "Context", value: state.runtime_context?.length || 0 },
     { label: "Skills", value: state.memory_counts.skills },
     { label: "Insights", value: state.memory_counts.insights },
     {
@@ -128,6 +137,16 @@ const renderState = (state) => {
       `
     )
     .join("");
+
+  renderCards(
+    contextList,
+    state.runtime_context || [],
+    (item) => `
+      <span class="label">${escapeHtml(item.category)}</span>
+      <strong>${escapeHtml(item.title)}</strong>
+      <p>${escapeHtml(item.content)}</p>
+    `
+  );
 
   renderCards(
     memoryList,
@@ -687,18 +706,23 @@ refreshButton.addEventListener("click", refreshState);
 enrollAdminButton.addEventListener("click", enrollAdmin);
 toggleVoiceButton.addEventListener("click", toggleVoiceMode);
 
-profileForm.addEventListener("submit", async (event) => {
+contextForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  await fetchJson("/api/profile", {
+  const message = contextInput.value.trim();
+  if (!message) return;
+
+  await fetchJson("/api/interactions", {
     method: "POST",
     body: JSON.stringify({
-      name: document.querySelector("#profile-name").value.trim(),
-      role: document.querySelector("#profile-role").value.trim(),
-      goals: document.querySelector("#profile-goals").value.trim(),
-      preferences: document.querySelector("#profile-preferences").value.trim(),
+      message,
+      modality: "text",
+      metadata: {
+        source: "context_form",
+        interaction_kind: "operating_context",
+      },
     }),
   });
-  profileForm.reset();
+  contextForm.reset();
   await refreshState();
 });
 

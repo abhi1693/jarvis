@@ -7,7 +7,7 @@ from app.config import Settings
 from app.intents import IntentService
 from app.llm import LLMAdapter
 from app.memory_store import MemoryStore
-from app.models import InteractionResponse, IntentResult
+from app.models import InteractionResponse, IntentResult, MemoryCandidate
 from app.self_improvement import SelfImprovementService
 from app.tools.filesystem import FilesystemTool
 from app.tools.shell import ShellTool
@@ -55,29 +55,41 @@ class AgentRuntime:
             metadata=metadata,
             media_path=media_path,
         )
-        self._remember_facts(intent.extracted_facts, modality)
+        self._store_memory_candidates(intent.memory_candidates, modality)
         self._store_experience(normalized_message, modality, intent.name)
 
+        runtime_context = self._memory_store.list_context_memories(limit=8)
         recalled_memories = self._memory_store.recall(normalized_message, limit=self._settings.memory_recall_limit)
         skills = self._memory_store.list_recent_skills(limit=4)
 
         insights: list[dict[str, Any]] = []
         tool_trace: list[dict[str, Any]] = []
 
-        if intent.name == "remember":
+        if intent.name == "orient":
+            response_text = self._handle_orientation(normalized_message, intent, modality)
+        elif intent.name == "remember":
             response_text = self._handle_remember(normalized_message, intent, modality)
         elif intent.name == "memory_query":
-            response_text = self._handle_memory_query()
+            response_text = self._handle_memory_query(runtime_context)
         elif intent.name == "web_search":
             response_text, tool_trace = self._handle_web_search(normalized_message)
         elif intent.name == "tool_use":
             response_text, tool_trace = self._handle_tool_use(normalized_message)
         elif intent.name == "create":
-            response_text, tool_trace = await self._handle_creation_request(normalized_message, recalled_memories)
+            response_text, tool_trace = await self._handle_creation_request(
+                normalized_message,
+                recalled_memories,
+                runtime_context,
+            )
         elif intent.name == "evolve":
             response_text, tool_trace, insights = self._handle_evolution(normalized_message)
         else:
-            response_text = await self._handle_conversation(normalized_message, recalled_memories, modality)
+            response_text = await self._handle_conversation(
+                normalized_message,
+                recalled_memories,
+                runtime_context,
+                modality,
+            )
 
         self._memory_store.record_interaction(
             "assistant",
@@ -118,31 +130,37 @@ class AgentRuntime:
         return {"ok": False, "error": f"Unknown tool '{tool_name}'"}
 
     def update_profile(self, payload: dict[str, str | None]) -> None:
+        category_map = {
+            "name": "person",
+            "role": "relationship",
+            "goals": "objective",
+            "preferences": "preference",
+        }
         for key, value in payload.items():
             if not value:
                 continue
             self._memory_store.store_memory(
-                category="profile",
+                category=category_map.get(key, "context"),
                 title=key,
                 content=value,
-                tags=["person", "profile", key],
-                source="profile_form",
+                tags=[category_map.get(key, "context"), key],
+                source="context_form",
                 confidence=0.95,
             )
 
-    def _remember_facts(self, facts: dict[str, str], modality: str) -> None:
-        for key, value in facts.items():
+    def _store_memory_candidates(self, candidates: list[MemoryCandidate], modality: str) -> None:
+        for candidate in candidates:
             self._memory_store.store_memory(
-                category="profile",
-                title=key,
-                content=value,
-                tags=["person", key, modality],
+                category=candidate.category,
+                title=candidate.title,
+                content=candidate.content,
+                tags=sorted(set([*candidate.tags, candidate.category, modality])),
                 source=modality,
-                confidence=0.92,
+                confidence=candidate.confidence,
             )
 
     def _store_experience(self, message: str, modality: str, intent_name: str) -> None:
-        if intent_name in {"tool_use", "evolve"}:
+        if intent_name in {"tool_use", "evolve", "orient"}:
             return
         if len(message.strip()) < 12:
             return
@@ -156,9 +174,11 @@ class AgentRuntime:
         )
 
     def _handle_remember(self, message: str, intent: IntentResult, modality: str) -> str:
-        if intent.extracted_facts:
-            stored = ", ".join(f"{key}={value}" for key, value in intent.extracted_facts.items())
-            return f"Stored durable profile memory from {modality}: {stored}."
+        if intent.memory_candidates:
+            stored = ", ".join(
+                f"{candidate.title}={candidate.content}" for candidate in intent.memory_candidates[:4]
+            )
+            return f"Stored durable memory from {modality}: {stored}."
 
         self._memory_store.store_memory(
             category="note",
@@ -170,13 +190,47 @@ class AgentRuntime:
         )
         return f"Stored that {modality} note in long-term memory."
 
-    def _handle_memory_query(self) -> str:
+    def _handle_orientation(self, message: str, intent: IntentResult, modality: str) -> str:
+        if not intent.memory_candidates:
+            self._memory_store.store_memory(
+                category="context",
+                title="operator_direction",
+                content=message,
+                tags=["context", "operator", modality],
+                source=modality,
+                confidence=0.82,
+            )
+            return "Stored that as part of my operating context."
+
+        lines = [
+            f"- [{candidate.category}] {candidate.title}: {candidate.content}"
+            for candidate in intent.memory_candidates[:6]
+        ]
+        return "Updated my operating context with:\n" + "\n".join(lines)
+
+    def _handle_memory_query(self, runtime_context: list[dict[str, Any]]) -> str:
         memories = self._memory_store.recall(limit=10)
         if not memories:
-            return "I do not have durable memory yet. Speak, type, or show patterns over time and I will accumulate them."
+            return "I do not have durable memory yet. Give me context, duties, or repeated interactions and I will accumulate them."
 
-        lines = [f"- [{memory['category']}] {memory['title']}: {memory['content']}" for memory in memories[:8]]
-        return "What I currently remember:\n" + "\n".join(lines)
+        sections: list[str] = []
+        if runtime_context:
+            sections.append(
+                "Current operating context:\n"
+                + "\n".join(
+                    f"- [{memory['category']}] {memory['title']}: {memory['content']}"
+                    for memory in runtime_context[:6]
+                )
+            )
+
+        sections.append(
+            "Recent memory:\n"
+            + "\n".join(
+                f"- [{memory['category']}] {memory['title']}: {memory['content']}"
+                for memory in memories[:8]
+            )
+        )
+        return "\n\n".join(sections)
 
     def _handle_web_search(self, message: str) -> tuple[str, list[dict[str, Any]]]:
         query = re.sub(r"^(search the web for|look up|find online|google)\s+", "", message, flags=re.I).strip()
@@ -222,29 +276,34 @@ class AgentRuntime:
         )
 
     async def _handle_creation_request(
-        self, message: str, recalled_memories: list[dict[str, Any]]
+        self,
+        message: str,
+        recalled_memories: list[dict[str, Any]],
+        runtime_context: list[dict[str, Any]],
     ) -> tuple[str, list[dict[str, Any]]]:
         if self._message_mentions_repo(message):
-            return await self._handle_repo_creation_request(message, recalled_memories)
+            return await self._handle_repo_creation_request(message, recalled_memories, runtime_context)
 
         if self._llm_adapter.enabled:
-            memory_summary = "\n".join(
-                f"- {memory['title']}: {memory['content']}" for memory in recalled_memories[:5]
-            )
+            memory_summary = self._build_context_summary(runtime_context, recalled_memories)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
-                    "You are a concise general-purpose evolving assistant. Help plan or create the requested thing. "
-                    "Use user memories when helpful."
+                    "You are a concise adaptive local agent. "
+                    "Your duties come from the operator-defined context, not a fixed product role. "
+                    "Help plan or create the requested thing while respecting that context."
                 ),
-                user_prompt=f"Request: {message}\nRelevant memory:\n{memory_summary or '- none'}",
+                user_prompt=f"Request: {message}\nOperating context:\n{memory_summary}",
             )
             if reply:
                 return reply, []
 
-        return self._build_rule_based_creation_reply(message, recalled_memories), []
+        return self._build_rule_based_creation_reply(message, runtime_context, recalled_memories), []
 
     async def _handle_repo_creation_request(
-        self, message: str, recalled_memories: list[dict[str, Any]]
+        self,
+        message: str,
+        recalled_memories: list[dict[str, Any]],
+        runtime_context: list[dict[str, Any]],
     ) -> tuple[str, list[dict[str, Any]]]:
         keywords = self._extract_keywords(message)
         pattern = " ".join(keywords[:3]) if keywords else message
@@ -252,10 +311,11 @@ class AgentRuntime:
         trace = [{"tool": "search_text", "pattern": pattern, "result": search_result}]
 
         if self._llm_adapter.enabled:
-            prompt = self._build_repo_prompt(message, recalled_memories, search_result)
+            prompt = self._build_repo_prompt(message, runtime_context, recalled_memories, search_result)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
-                    "You are a terse repo copilot. Use the provided repository matches and memories. "
+                    "You are a terse repo copilot inside an adaptive agent. "
+                    "Use the provided operating context, repository matches, and memories. "
                     "Do not invent files or code that were not supplied."
                 ),
                 user_prompt=prompt,
@@ -288,28 +348,42 @@ class AgentRuntime:
         return result["summary"], result["tool_trace"], result["insights"]
 
     async def _handle_conversation(
-        self, message: str, recalled_memories: list[dict[str, Any]], modality: str
+        self,
+        message: str,
+        recalled_memories: list[dict[str, Any]],
+        runtime_context: list[dict[str, Any]],
+        modality: str,
     ) -> str:
         if self._llm_adapter.enabled:
-            memory_summary = "\n".join(
-                f"- {memory['title']}: {memory['content']}" for memory in recalled_memories[:5]
-            )
+            context_summary = self._build_context_summary(runtime_context, recalled_memories)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
-                    "You are a local-first multimodal agent. You learn from text, voice, and camera over time. "
+                    "You are a local-first adaptive agent. "
+                    "You do not have fixed duties: derive your role, priorities, and style from the current operating context. "
+                    "If the operator has not defined enough context, ask concise questions that help shape your role. "
                     "Be concise and grounded."
                 ),
                 user_prompt=(
+                    f"Operating context:\n{context_summary}\n"
                     f"Modality: {modality}\n"
                     f"User message: {message}\n"
-                    f"Relevant memory:\n{memory_summary or '- none'}"
+                    "Respond in a way that fits the current context."
                 ),
             )
             if reply:
                 return reply
 
+        context_summary = self._build_context_summary(runtime_context, recalled_memories)
+        if runtime_context:
+            return (
+                "I’m shaping myself around this current context:\n"
+                f"{context_summary}\n"
+                "Give me a task, correction, or new duty and I’ll keep adapting."
+            )
+
         return (
-            "I logged that interaction. I can learn durable facts, keep experiences, observe presence through the camera, accept voice transcripts, search the web, and use local tools when asked."
+            "I do not have a fixed role yet. Tell me what duties, boundaries, and collaboration style you want, "
+            "and I will turn that into durable operating context."
         )
 
     def _learn_skill(self, intent_name: str, tool_trace: list[dict[str, Any]], message: str) -> None:
@@ -360,34 +434,41 @@ class AgentRuntime:
         return [token for token in tokens if token not in stopwords]
 
     def _build_repo_prompt(
-        self, message: str, recalled_memories: list[dict[str, Any]], search_result: dict[str, Any]
+        self,
+        message: str,
+        runtime_context: list[dict[str, Any]],
+        recalled_memories: list[dict[str, Any]],
+        search_result: dict[str, Any],
     ) -> str:
-        memories = "\n".join(f"- {memory['title']}: {memory['content']}" for memory in recalled_memories[:5])
+        context = self._build_context_summary(runtime_context, recalled_memories)
         matches = "\n".join(
             f"- {item['path']}:{item['line_number']} -> {item['line']}"
             for item in search_result.get("matches", [])[:12]
         )
         return (
             f"Task: {message}\n"
-            f"Relevant memories:\n{memories or '- none'}\n"
+            f"Operating context:\n{context}\n"
             f"Repository matches:\n{matches or '- none'}\n"
             "Respond with actionable guidance and reference the concrete matches."
         )
 
     def _build_rule_based_creation_reply(
-        self, message: str, recalled_memories: list[dict[str, Any]]
+        self,
+        message: str,
+        runtime_context: list[dict[str, Any]],
+        recalled_memories: list[dict[str, Any]],
     ) -> str:
         lowered = message.lower()
-        memory_hint = ""
-        for memory in recalled_memories:
-            if memory["category"] == "profile" and memory["title"] in {"habit", "preference", "goal"}:
-                memory_hint = f"I’m factoring in your {memory['title']}: {memory['content']}.\n"
+        context_hint = ""
+        for memory in [*runtime_context, *recalled_memories]:
+            if memory["category"] in {"charter", "objective", "preference", "interaction_style"}:
+                context_hint = f"I’m factoring in your {memory['title']}: {memory['content']}.\n"
                 break
 
         subject = re.sub(r"^(help me|please|can you)\s+", "", message, flags=re.I).strip()
         if "routine" in lowered:
             return (
-                f"{memory_hint}Draft routine for: {subject}\n"
+                f"{context_hint}Draft routine for: {subject}\n"
                 "1. Define the feeling or outcome you want from it.\n"
                 "2. Keep the first step frictionless and under five minutes.\n"
                 "3. Add one anchor behavior, one core action, and one shutdown cue.\n"
@@ -396,7 +477,7 @@ class AgentRuntime:
 
         if "plan" in lowered:
             return (
-                f"{memory_hint}Working plan for: {subject}\n"
+                f"{context_hint}Working plan for: {subject}\n"
                 "1. State the outcome in one sentence.\n"
                 "2. List constraints, tools, and available time.\n"
                 "3. Break the work into the smallest next three actions.\n"
@@ -404,9 +485,30 @@ class AgentRuntime:
             )
 
         return (
-            f"{memory_hint}I can help shape '{subject}' into a concrete plan. "
+            f"{context_hint}I can help shape '{subject}' into a concrete plan. "
             "Tell me the desired outcome, constraints, and first deadline, or mention repo/code context if this should use local tools."
         )
+
+    def _build_context_summary(
+        self,
+        runtime_context: list[dict[str, Any]],
+        recalled_memories: list[dict[str, Any]],
+    ) -> str:
+        pool = runtime_context or recalled_memories
+        if not pool:
+            return "- no durable operating context yet"
+
+        lines: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for memory in pool:
+            key = (memory["category"], memory["title"])
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- [{memory['category']}] {memory['title']}: {memory['content']}")
+            if len(lines) >= 8:
+                break
+        return "\n".join(lines) if lines else "- no durable operating context yet"
 
     def _format_tool_result(self, tool_name: str, result: dict[str, Any]) -> str:
         if not result.get("ok"):
