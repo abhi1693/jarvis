@@ -47,7 +47,9 @@ class MemoryStore:
         self._db_path = db_path
         self._brain_root = (brain_root or (db_path.parent / "agent_brain")).resolve()
         self._workspace_root = self._brain_root / "workspace"
+        self._workspace_skill_root = self._workspace_root / "skills"
         self._knowledge_root = self._brain_root / "knowledge"
+        self._skill_library_root = self._brain_root / "library" / "skills"
         self._archive_root = self._knowledge_root / "archive"
         self._archived_memory_root = self._archive_root / "memories"
         self._memory_root = self._knowledge_root / "memories"
@@ -64,6 +66,7 @@ class MemoryStore:
         self._skills_doc_path = self._brain_root / "skills.md"
         self._insights_doc_path = self._brain_root / "insights.md"
         self._workspace_map_doc_path = self._brain_root / "workspace-map.md"
+        self._skill_library_doc_path = self._brain_root / "skill-library.md"
         self._initialise()
 
     def record_interaction(
@@ -392,6 +395,7 @@ class MemoryStore:
         memory_limit: int = 8,
         interaction_limit: int = 8,
         workspace_limit: int = 4,
+        skill_limit: int = 4,
     ) -> dict[str, Any]:
         return {
             "persona": self._read_document_excerpt(self._persona_doc_path),
@@ -400,11 +404,47 @@ class MemoryStore:
             "skills": self._read_document_excerpt(self._skills_doc_path),
             "insights": self._read_document_excerpt(self._insights_doc_path),
             "workspace_map": self._read_document_excerpt(self._workspace_map_doc_path),
+            "skill_library": self._read_document_excerpt(self._skill_library_doc_path),
             "workspace_files": self._select_workspace_documents(query=query, limit=workspace_limit),
+            "skill_reference_files": self._select_skill_reference_documents(query=query, limit=skill_limit),
             "recent_memories": self.recall(query=query, limit=memory_limit),
             "recent_interactions": self.list_recent_interactions(limit=interaction_limit),
             "recent_skills": self.list_recent_skills(limit=6),
         }
+
+    def sync_external_skill_library(self, source_dirs: tuple[Path, ...] | list[Path]) -> dict[str, Any]:
+        imported = 0
+        skipped = 0
+        copied_paths: list[str] = []
+        active_source_labels: set[Path] = set()
+
+        for source_dir in source_dirs:
+            expanded = source_dir.expanduser()
+            if not expanded.exists() or not expanded.is_dir():
+                continue
+
+            source_label = self._slugify(f"{expanded.parent.name}-{expanded.name}")
+            target_source_root = self._skill_library_root / source_label
+            active_source_labels.add(target_source_root)
+            active_skill_dirs: set[Path] = set()
+            for skill_file in expanded.rglob("SKILL.md"):
+                if not skill_file.is_file():
+                    continue
+                source_skill_dir = skill_file.parent
+                relative_parent = source_skill_dir.relative_to(expanded)
+                target_skill_dir = target_source_root / relative_parent
+                copied_count, skipped_count = self._mirror_directory(source_skill_dir, target_skill_dir)
+                imported += copied_count
+                skipped += skipped_count
+                active_skill_dirs.add(target_skill_dir)
+                copied_paths.append(str(target_skill_dir.relative_to(self._brain_root)))
+
+            self._prune_missing_skill_directories(target_source_root, active_skill_dirs)
+
+        self._prune_missing_source_libraries(active_source_labels)
+
+        self._sync_brain_documents()
+        return {"imported": imported, "skipped": skipped, "paths": copied_paths}
 
     def _initialise(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -412,7 +452,9 @@ class MemoryStore:
         for directory in (
             self._brain_root,
             self._workspace_root,
+            self._workspace_skill_root,
             self._knowledge_root,
+            self._skill_library_root,
             self._archive_root,
             self._archived_memory_root,
             self._memory_root,
@@ -857,9 +899,13 @@ class MemoryStore:
                 "- `working-memory.md`: active notes, short-horizon state, and in-flight context.\n"
                 "- `long-term-memory.md`: accumulated durable knowledge that does not fit persona.\n"
                 "- `skills.md`: learned tool and execution patterns.\n"
+                "- `skill-library.md`: imported and brain-local skill references the agent can consult.\n"
                 "- `insights.md`: evolution findings and codebase observations.\n"
                 "- `workspace-map.md`: current tree of the freeform workspace.\n"
-                "- `workspace/`: freeform directory tree the agent can organize as needed.",
+                "- `workspace/`: freeform directory tree the agent can organize as needed.\n"
+                "- `workspace/skills/`: brain-local skill files created or maintained by the agent.\n"
+                "- `library/skills/`: imported skill directories mirrored from external skill libraries, "
+                "including supporting files alongside `SKILL.md`.",
             ],
         )
         if not self._workspace_readme_path.exists():
@@ -905,6 +951,14 @@ class MemoryStore:
             ],
         )
         self._write_markdown_document(
+            self._skill_library_doc_path,
+            "Skill Library",
+            [
+                "Imported and brain-local skill references available for the agent to consult.",
+                self._render_skill_reference_entries(self._load_skill_reference_records()),
+            ],
+        )
+        self._write_markdown_document(
             self._insights_doc_path,
             "Evolution Insights",
             [
@@ -945,6 +999,14 @@ class MemoryStore:
             )
         return "\n".join(lines)
 
+    def _render_skill_reference_entries(self, records: list[dict[str, Any]]) -> str:
+        if not records:
+            return "## Entries\n- none yet"
+        lines = ["## Entries"]
+        for record in records[:120]:
+            lines.append(f"- **{record['name']}** [{record['source']}] `{record['path']}`")
+        return "\n".join(lines)
+
     def _render_insight_entries(self, records: list[dict[str, Any]]) -> str:
         if not records:
             return "## Entries\n- none yet"
@@ -972,3 +1034,132 @@ class MemoryStore:
         if not entries:
             entries.append("  - README.md")
         return "\n".join(lines + entries)
+
+    def _mirror_directory(self, source_dir: Path, target_dir: Path) -> tuple[int, int]:
+        copied = 0
+        skipped = 0
+        seen_paths: set[Path] = set()
+
+        for source_path in sorted(source_dir.rglob("*")):
+            relative_path = source_path.relative_to(source_dir)
+            target_path = target_dir / relative_path
+            seen_paths.add(target_path)
+
+            if source_path.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            source_bytes = source_path.read_bytes()
+            if target_path.exists() and target_path.is_file() and target_path.read_bytes() == source_bytes:
+                skipped += 1
+                continue
+
+            target_path.write_bytes(source_bytes)
+            shutil.copystat(source_path, target_path)
+            copied += 1
+
+        if target_dir.exists():
+            for target_path in sorted(target_dir.rglob("*"), key=lambda item: len(item.relative_to(target_dir).parts), reverse=True):
+                if target_path in seen_paths:
+                    continue
+                if target_path.is_file():
+                    target_path.unlink()
+                else:
+                    target_path.rmdir()
+
+        return copied, skipped
+
+    def _prune_missing_skill_directories(self, root: Path, active_skill_dirs: set[Path]) -> None:
+        if not root.exists():
+            return
+        for candidate in sorted(root.iterdir(), key=lambda item: item.name, reverse=True):
+            if not candidate.is_dir():
+                continue
+            if candidate in active_skill_dirs:
+                continue
+            shutil.rmtree(candidate)
+        if root.exists() and not any(root.iterdir()):
+            root.rmdir()
+
+    def _prune_missing_source_libraries(self, active_source_labels: set[Path]) -> None:
+        if not self._skill_library_root.exists():
+            return
+        for candidate in sorted(self._skill_library_root.iterdir(), key=lambda item: item.name, reverse=True):
+            if not candidate.is_dir():
+                continue
+            if candidate in active_source_labels:
+                continue
+            shutil.rmtree(candidate)
+
+    def _load_skill_reference_records(self) -> list[dict[str, Any]]:
+        records = []
+        sources = (
+            (self._workspace_skill_root, "brain"),
+            (self._skill_library_root, "imported"),
+        )
+        for root, source_label in sources:
+            if not root.exists():
+                continue
+            for path in root.rglob("*.md"):
+                if source_label == "imported" and path.name != "SKILL.md":
+                    continue
+                if source_label == "brain" and path.name == "README.md":
+                    continue
+                content = path.read_text(encoding="utf-8").strip()
+                relative = path.relative_to(self._brain_root)
+                if path.name == "SKILL.md":
+                    name = path.parent.name
+                else:
+                    name = path.stem
+                records.append(
+                    {
+                        "name": name,
+                        "path": str(relative),
+                        "source": source_label,
+                        "content": content,
+                        "mtime": path.stat().st_mtime,
+                    }
+                )
+        records.sort(key=lambda item: (item["mtime"], item["path"]), reverse=True)
+        return records
+
+    def _select_skill_reference_documents(
+        self,
+        query: str,
+        limit: int = 4,
+        max_chars: int = 1200,
+    ) -> list[dict[str, str]]:
+        records = self._load_skill_reference_records()
+        tokens = self._search_tokens(query)
+        ranked: list[tuple[int, float, dict[str, Any]]] = []
+
+        for record in records:
+            lowered_name = record["name"].lower()
+            lowered_path = record["path"].lower()
+            lowered_content = record["content"].lower()
+            score = 0
+            for token in tokens:
+                if token in lowered_name:
+                    score += 5
+                if token in lowered_path:
+                    score += 4
+                if token in lowered_content:
+                    score += 1
+            ranked.append((score, record["mtime"], record))
+
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if tokens:
+            ranked = [item for item in ranked if item[0] > 0]
+
+        results = []
+        for _score, _mtime, record in ranked[:limit]:
+            results.append(
+                {
+                    "name": record["name"],
+                    "path": record["path"],
+                    "source": record["source"],
+                    "content": record["content"][:max_chars],
+                }
+            )
+        return results

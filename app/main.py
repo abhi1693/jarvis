@@ -79,6 +79,7 @@ async def _brain_maintenance_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
+    memory_store.sync_external_skill_library(settings.brain_skill_source_dirs)
     await brain_service.refresh(reason="startup", force=True)
     app_instance.state.brain_task = asyncio.create_task(_brain_maintenance_loop())
     try:

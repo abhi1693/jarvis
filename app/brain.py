@@ -39,6 +39,7 @@ class BrainService:
             memory_limit=self._settings.memory_recall_limit,
             interaction_limit=6,
             workspace_limit=4,
+            skill_limit=4,
         )
         sections = []
 
@@ -65,6 +66,7 @@ class BrainService:
             ("Working memory file", "working_memory"),
             ("Long-term memory file", "long_term_memory"),
             ("Skills file", "skills"),
+            ("Skill library", "skill_library"),
         ):
             content = str(brain.get(key, "")).strip()
             if content:
@@ -77,6 +79,14 @@ class BrainService:
             workspace_notes.append(f"- {item['path']}\n{item['content']}")
         if workspace_notes:
             sections.append("Workspace notes:\n" + "\n".join(workspace_notes))
+
+        skill_reference_notes = []
+        for item in brain.get("skill_reference_files", []):
+            skill_reference_notes.append(
+                f"- {item['name']} [{item['source']}] {item['path']}\n{item['content']}"
+            )
+        if skill_reference_notes:
+            sections.append("Relevant skill references:\n" + "\n".join(skill_reference_notes))
 
         recent_skills = []
         for skill in skills[:6]:

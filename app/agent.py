@@ -540,10 +540,17 @@ class AgentRuntime:
     def _brain_workspace_brief(self) -> str:
         relative_root = self._settings.brain_root.relative_to(self._settings.repo_root)
         relative_workspace = self._settings.brain_workspace_dir.relative_to(self._settings.repo_root)
+        relative_skill_dir = self._settings.brain_skill_dir.relative_to(self._settings.repo_root)
+        relative_imported_skill_dir = (self._settings.brain_root / "library" / "skills").relative_to(
+            self._settings.repo_root
+        )
         return (
             f"You own the brain directory at {relative_root}. "
             f"Use {relative_workspace} as your freeform external workspace. "
-            "You may create folders, write markdown notes, and rearrange files there to organize memory."
+            f"Use {relative_skill_dir} for brain-local skill files. "
+            "You may create folders, write markdown notes and skills, and rearrange files there to organize memory. "
+            f"Imported skills from well-known external directories are mirrored under {relative_imported_skill_dir}; "
+            "use them when relevant and read any sibling references or scripts they include."
         )
 
     def _assistant_persona_brief(self) -> str:
