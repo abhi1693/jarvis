@@ -12,8 +12,6 @@ const video = document.querySelector("#camera-feed");
 const overlayCanvas = document.querySelector("#overlay-canvas");
 const canvas = document.querySelector("#snapshot-canvas");
 const enrollAdminButton = document.querySelector("#enroll-admin");
-const startCameraButton = document.querySelector("#start-camera");
-const stopCameraButton = document.querySelector("#stop-camera");
 const cameraStatus = document.querySelector("#camera-status");
 const startVoiceButton = document.querySelector("#start-voice");
 const stopVoiceButton = document.querySelector("#stop-voice");
@@ -29,6 +27,7 @@ let speechRecognition = null;
 let finalTranscript = "";
 let interimTranscript = "";
 let lastObservation = null;
+let cameraStartPromise = null;
 
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -169,6 +168,16 @@ const blobToDataUrl = (blob) =>
     reader.readAsDataURL(blob);
   });
 
+const waitForVideoFrame = () =>
+  new Promise((resolve) => {
+    if (video.videoWidth && video.videoHeight && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      resolve();
+      return;
+    }
+
+    video.addEventListener("loadedmetadata", resolve, { once: true });
+  });
+
 const captureObservation = async () => {
   if (!cameraStream) return;
   const imageDataUrl = captureCurrentFrame();
@@ -256,41 +265,55 @@ const drawFaceOverlay = (observation) => {
 };
 
 const startCamera = async () => {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    cameraStatus.textContent = "Camera access is not available in this browser.";
-    return;
-  }
-  cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-  video.srcObject = cameraStream;
-  cameraStatus.textContent = "Camera live. Capturing observations every 6 seconds.";
-  video.addEventListener(
-    "loadedmetadata",
-    () => {
-      drawFaceOverlay(lastObservation);
-    },
-    { once: true }
-  );
-  clearInterval(observationTimer);
-  observationTimer = setInterval(captureObservation, 6000);
-};
+  if (cameraStream) return cameraStream;
+  if (cameraStartPromise) return cameraStartPromise;
 
-const stopCamera = () => {
-  if (cameraStream) {
-    cameraStream.getTracks().forEach((track) => track.stop());
-    cameraStream = null;
+  cameraStartPromise = (async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      cameraStatus.textContent = "Camera access is not available in this browser.";
+      return null;
+    }
+
+    cameraStatus.textContent = "Requesting camera access...";
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    } catch (error) {
+      cameraStatus.textContent =
+        "Camera access was blocked. Allow permission and reload the page.";
+      return null;
+    }
+
+    video.srcObject = cameraStream;
+    cameraStatus.textContent = "Camera live. Capturing observations every 6 seconds.";
+    video.addEventListener(
+      "loadedmetadata",
+      () => {
+        drawFaceOverlay(lastObservation);
+      },
+      { once: true }
+    );
+    clearInterval(observationTimer);
+    observationTimer = setInterval(captureObservation, 6000);
+    await waitForVideoFrame();
+    await captureObservation();
+    return cameraStream;
+  })();
+
+  try {
+    return await cameraStartPromise;
+  } finally {
+    cameraStartPromise = null;
   }
-  clearInterval(observationTimer);
-  observationTimer = null;
-  video.srcObject = null;
-  const context = overlayCanvas.getContext("2d");
-  context.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-  cameraStatus.textContent = "Camera stopped.";
 };
 
 const enrollAdmin = async () => {
+  if (!cameraStream) {
+    await startCamera();
+  }
+  await waitForVideoFrame();
   const imageDataUrl = captureCurrentFrame();
   if (!imageDataUrl) {
-    cameraStatus.textContent = "Start the camera before enrolling the admin face.";
+    cameraStatus.textContent = "Waiting for the camera feed before enrolling the admin face.";
     return;
   }
 
@@ -425,8 +448,6 @@ runEvolutionButton.addEventListener("click", async () => {
 });
 
 refreshButton.addEventListener("click", refreshState);
-startCameraButton.addEventListener("click", startCamera);
-stopCameraButton.addEventListener("click", stopCamera);
 enrollAdminButton.addEventListener("click", enrollAdmin);
 startVoiceButton.addEventListener("click", startVoice);
 stopVoiceButton.addEventListener("click", stopVoice);
@@ -447,4 +468,5 @@ profileForm.addEventListener("submit", async (event) => {
 });
 
 refreshState();
+startCamera();
 setInterval(refreshState, 12000);
