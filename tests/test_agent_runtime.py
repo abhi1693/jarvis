@@ -94,12 +94,15 @@ def make_settings(tmp_path: Path) -> Settings:
         media_dir=data_dir / "media",
         change_set_dir=data_dir / "change_sets",
         command_timeout_seconds=20,
+        llm_timeout_seconds=90,
         memory_recall_limit=8,
         brain_refresh_interval_seconds=1,
         brain_working_memory_ttl_seconds=60,
         llm_compat_url="http://llm.test",
         llm_model="test-model",
         llm_api_key=None,
+        codex_cli_path=None,
+        codex_cli_model="gpt-5.1-mini",
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.brain_root.mkdir(parents=True, exist_ok=True)

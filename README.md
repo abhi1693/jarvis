@@ -83,6 +83,11 @@ export LLM_MODEL="your-model-name"
 export LLM_API_KEY="optional"
 ```
 
+If `LLM_COMPAT_URL` and `LLM_MODEL` are not set, Jarvis now falls back to the system `codex` CLI when
+`codex` is available on `PATH` or `CODEX_CLI_PATH` is set. It first tries `gpt-5.1-mini` by default,
+or `CODEX_CLI_MODEL` if set, and retries with the CLI's account default model when that explicit
+model is unsupported.
+
 ## Current Limits
 
 This is a solid multimodal MVP, not a finished autonomous organism.
