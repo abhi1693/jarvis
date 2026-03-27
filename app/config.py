@@ -11,6 +11,8 @@ class Settings:
     repo_root: Path
     data_dir: Path
     db_path: Path
+    brain_root: Path
+    brain_workspace_dir: Path
     admin_face_path: Path
     snapshot_dir: Path
     media_dir: Path
@@ -38,6 +40,8 @@ def get_settings() -> Settings:
         repo_root=repo_root,
         data_dir=data_dir,
         db_path=data_dir / "jarvis.db",
+        brain_root=data_dir / "agent_brain",
+        brain_workspace_dir=data_dir / "agent_brain" / "workspace",
         admin_face_path=data_dir / "admin_face.npy",
         snapshot_dir=data_dir / "snapshots",
         media_dir=data_dir / "media",
@@ -49,6 +53,8 @@ def get_settings() -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY"),
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.brain_root.mkdir(parents=True, exist_ok=True)
+    settings.brain_workspace_dir.mkdir(parents=True, exist_ok=True)
     settings.snapshot_dir.mkdir(parents=True, exist_ok=True)
     settings.media_dir.mkdir(parents=True, exist_ok=True)
     settings.change_set_dir.mkdir(parents=True, exist_ok=True)

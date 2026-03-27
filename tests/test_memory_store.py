@@ -31,13 +31,17 @@ def test_memory_store_round_trip(tmp_path: Path):
     skills = store.list_recent_skills()
     interactions = store.list_recent_interactions()
     counts = store.get_memory_counts()
-    markdown_files = list((tmp_path / "agent_memory").rglob("*.md"))
+    markdown_files = list((tmp_path / "agent_brain").rglob("*.md"))
 
     assert memories[0]["content"] == "Asha"
     assert skills[0]["trigger_hint"] == "create"
     assert interactions[0]["modality"] == "audio"
     assert counts["memories"] == 1
     assert markdown_files
+    assert (tmp_path / "agent_brain" / "persona.md").exists()
+    assert (tmp_path / "agent_brain" / "working-memory.md").exists()
+    assert (tmp_path / "agent_brain" / "long-term-memory.md").exists()
+    assert (tmp_path / "agent_brain" / "workspace").exists()
 
 
 def test_memory_store_returns_runtime_context(tmp_path: Path):
@@ -97,7 +101,7 @@ def test_legacy_db_memories_migrate_to_markdown(tmp_path: Path):
     store = MemoryStore(db_path)
 
     memories = store.recall("Asha")
-    markdown_files = list((tmp_path / "agent_memory" / "memories").rglob("*.md"))
+    markdown_files = list((tmp_path / "agent_brain" / "knowledge" / "memories").rglob("*.md"))
 
     assert memories[0]["content"] == "Asha"
     assert markdown_files

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -33,15 +34,25 @@ class MemoryStore:
     }
     _WORKING_MEMORY_CATEGORIES = {"context", "experience", "note", "state"}
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, brain_root: Path | None = None):
         self._db_path = db_path
-        self._knowledge_root = db_path.parent / "agent_memory"
+        self._brain_root = (brain_root or (db_path.parent / "agent_brain")).resolve()
+        self._workspace_root = self._brain_root / "workspace"
+        self._knowledge_root = self._brain_root / "knowledge"
         self._memory_root = self._knowledge_root / "memories"
         self._persona_root = self._memory_root / "persona"
         self._working_root = self._memory_root / "working"
         self._long_term_root = self._memory_root / "long_term"
         self._skill_root = self._knowledge_root / "skills"
         self._insight_root = self._knowledge_root / "insights"
+        self._brain_readme_path = self._brain_root / "README.md"
+        self._workspace_readme_path = self._workspace_root / "README.md"
+        self._persona_doc_path = self._brain_root / "persona.md"
+        self._working_memory_doc_path = self._brain_root / "working-memory.md"
+        self._long_term_doc_path = self._brain_root / "long-term-memory.md"
+        self._skills_doc_path = self._brain_root / "skills.md"
+        self._insights_doc_path = self._brain_root / "insights.md"
+        self._workspace_map_doc_path = self._brain_root / "workspace-map.md"
         self._initialise()
 
     def record_interaction(
@@ -115,6 +126,7 @@ class MemoryStore:
         target = self._memory_path(record_id, category, title, created_at)
         body = f"# {title}\n\n{content}".strip() + "\n"
         self._write_markdown_record(target, metadata, body)
+        self._sync_brain_documents()
         return record_id
 
     def recall(self, query: str = "", category: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
@@ -178,6 +190,7 @@ class MemoryStore:
         step_lines = "\n".join(f"- `{json.dumps(step, sort_keys=True)}`" for step in steps) or "- none"
         body = f"# {name}\n\n{description}\n\n## Steps\n{step_lines}\n"
         self._write_markdown_record(target, metadata, body)
+        self._sync_brain_documents()
         return int(metadata["id"])
 
     def store_observation(
@@ -248,6 +261,7 @@ class MemoryStore:
         target = self._insight_path(record_id, title, created_at)
         body = f"# {title}\n\n{details}".strip() + "\n"
         self._write_markdown_record(target, metadata, body)
+        self._sync_brain_documents()
         return record_id
 
     def list_recent_insights(self, limit: int = 8) -> list[dict[str, Any]]:
@@ -269,7 +283,10 @@ class MemoryStore:
 
     def _initialise(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_brain_root()
         for directory in (
+            self._brain_root,
+            self._workspace_root,
             self._knowledge_root,
             self._memory_root,
             self._persona_root,
@@ -313,6 +330,7 @@ class MemoryStore:
             self._ensure_column(connection, "interactions", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(connection, "interactions", "media_path", "TEXT")
             self._migrate_legacy_knowledge_to_markdown(connection)
+        self._sync_brain_documents()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._db_path)
@@ -409,6 +427,25 @@ class MemoryStore:
                 body = f"# {row['title']}\n\n{row['details']}".strip() + "\n"
                 self._write_markdown_record(target, metadata, body)
 
+    def _migrate_legacy_brain_root(self) -> None:
+        legacy_root = self._db_path.parent / "agent_memory"
+        if not legacy_root.exists() or legacy_root.resolve() == self._brain_root:
+            return
+
+        self._knowledge_root.mkdir(parents=True, exist_ok=True)
+        mappings = (
+            (legacy_root / "memories", self._memory_root),
+            (legacy_root / "skills", self._skill_root),
+            (legacy_root / "insights", self._insight_root),
+        )
+        for source, destination in mappings:
+            if source.exists() and not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination))
+
+        if legacy_root.exists() and not any(legacy_root.iterdir()):
+            legacy_root.rmdir()
+
     def _table_exists(self, connection: sqlite3.Connection, table: str) -> bool:
         row = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -487,6 +524,15 @@ class MemoryStore:
             lines.append(f"{key}: {json.dumps(value, ensure_ascii=True)}")
         lines.extend(["---", "", body.rstrip(), ""])
         path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _write_markdown_document(self, path: Path, title: str, sections: list[str]) -> None:
+        body = [f"# {title}", ""]
+        for section in sections:
+            if not section:
+                continue
+            body.append(section.rstrip())
+            body.append("")
+        path.write_text("\n".join(body).rstrip() + "\n", encoding="utf-8")
 
     def _read_markdown_metadata(self, path: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8")
@@ -596,3 +642,137 @@ class MemoryStore:
 
     def _search_tokens(self, query: str) -> list[str]:
         return re.findall(r"[A-Za-z0-9_]{2,}", query.lower())[:8]
+
+    def _sync_brain_documents(self) -> None:
+        memories = self._load_memory_records()
+        skills = self._load_skill_records()
+        insights = self._load_insight_records()
+
+        persona_memories = [record for record in memories if self._memory_bucket(record["category"]) == "persona"]
+        working_memories = [record for record in memories if self._memory_bucket(record["category"]) == "working"]
+        long_term_memories = [record for record in memories if self._memory_bucket(record["category"]) == "long_term"]
+
+        self._write_markdown_document(
+            self._brain_readme_path,
+            "Agent Brain",
+            [
+                "This directory is the agent's external brain. The agent may create, rearrange, and maintain files here.",
+                "## Canonical Memory Files\n"
+                "- `persona.md`: durable duties, preferences, relationship context, and behavioral identity.\n"
+                "- `working-memory.md`: active notes, short-horizon state, and in-flight context.\n"
+                "- `long-term-memory.md`: accumulated durable knowledge that does not fit persona.\n"
+                "- `skills.md`: learned tool and execution patterns.\n"
+                "- `insights.md`: evolution findings and codebase observations.\n"
+                "- `workspace-map.md`: current tree of the freeform workspace.\n"
+                "- `workspace/`: freeform directory tree the agent can organize as needed.",
+            ],
+        )
+        if not self._workspace_readme_path.exists():
+            self._write_markdown_document(
+                self._workspace_readme_path,
+                "Brain Workspace",
+                [
+                    "Use this directory as external working memory. Create folders, move notes, and reorganize structure as the brain evolves.",
+                ],
+            )
+
+        self._write_markdown_document(
+            self._persona_doc_path,
+            "Persona",
+            [
+                "Durable identity, duties, operator preferences, and behavioral constraints.",
+                self._render_memory_entries(persona_memories),
+            ],
+        )
+        self._write_markdown_document(
+            self._working_memory_doc_path,
+            "Working Memory",
+            [
+                "Active state, recent notes, and short-horizon context.",
+                self._render_memory_entries(working_memories),
+            ],
+        )
+        self._write_markdown_document(
+            self._long_term_doc_path,
+            "Long-Term Memory",
+            [
+                "Durable knowledge accumulated over time that is not part of the agent persona.",
+                self._render_memory_entries(long_term_memories),
+            ],
+        )
+        self._write_markdown_document(
+            self._skills_doc_path,
+            "Learned Skills",
+            [
+                "Execution patterns captured from successful tool usage.",
+                self._render_skill_entries(skills),
+            ],
+        )
+        self._write_markdown_document(
+            self._insights_doc_path,
+            "Evolution Insights",
+            [
+                "Tracked self-improvement findings and codebase issues.",
+                self._render_insight_entries(insights),
+            ],
+        )
+        self._write_markdown_document(
+            self._workspace_map_doc_path,
+            "Workspace Map",
+            [
+                "Current tree of the freeform brain workspace.",
+                self._render_workspace_tree(),
+            ],
+        )
+
+    def _render_memory_entries(self, records: list[dict[str, Any]]) -> str:
+        if not records:
+            return "## Entries\n- none yet"
+        lines = ["## Entries"]
+        for record in sorted(records, key=lambda item: (item["created_at"], item["id"]), reverse=True)[:80]:
+            tags = ", ".join(record.get("tags", []))
+            detail = f"- [{record['category']}] **{record['title']}**: {record['content']}"
+            if tags:
+                detail += f" (`{tags}`)"
+            detail += f" [{record['created_at']}]"
+            lines.append(detail)
+        return "\n".join(lines)
+
+    def _render_skill_entries(self, records: list[dict[str, Any]]) -> str:
+        if not records:
+            return "## Entries\n- none yet"
+        lines = ["## Entries"]
+        for record in records[:80]:
+            lines.append(
+                f"- **{record['name']}** (`{record['trigger_hint']}`): {record['description']} "
+                f"[successes: {record['success_count']}]"
+            )
+        return "\n".join(lines)
+
+    def _render_insight_entries(self, records: list[dict[str, Any]]) -> str:
+        if not records:
+            return "## Entries\n- none yet"
+        lines = ["## Entries"]
+        for record in records[:80]:
+            lines.append(
+                f"- **{record['severity']}** / **{record['status']}** / **{record['title']}**: {record['details']}"
+            )
+        return "\n".join(lines)
+
+    def _render_workspace_tree(self) -> str:
+        lines = ["## Tree", f"- {self._workspace_root.name}/"]
+        entries = []
+        for candidate in sorted(self._workspace_root.rglob("*")):
+            relative = candidate.relative_to(self._workspace_root)
+            if relative.parts == ("README.md",):
+                continue
+            depth = len(relative.parts)
+            prefix = "  " * depth
+            suffix = "/" if candidate.is_dir() else ""
+            entries.append(f"{prefix}- {relative.name}{suffix}")
+            if len(entries) >= 120:
+                entries.append("- ...")
+                break
+        if not entries:
+            entries.append("  - README.md")
+        return "\n".join(lines + entries)

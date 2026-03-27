@@ -30,10 +30,10 @@ from app.tools.web_search import WebSearchTool
 ADMIN_VISIBILITY_TTL_SECONDS = 2.0
 
 settings = get_settings()
-memory_store = MemoryStore(settings.db_path)
+memory_store = MemoryStore(settings.db_path, settings.brain_root)
 llm_adapter = LLMAdapter(settings)
 intent_service = IntentService(llm_adapter)
-filesystem_tool = FilesystemTool(settings.repo_root)
+filesystem_tool = FilesystemTool(settings.repo_root, settings.brain_root)
 shell_tool = ShellTool(settings.repo_root, settings.command_timeout_seconds)
 web_search_tool = WebSearchTool()
 self_improvement_service = SelfImprovementService(

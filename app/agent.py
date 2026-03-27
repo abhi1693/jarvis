@@ -117,6 +117,10 @@ class AgentRuntime:
             return self._fs_tool.read_file(args["path"], max_chars=int(args.get("max_chars", 12_000)))
         if tool_name == "write_file":
             return self._fs_tool.write_file(args["path"], args["content"])
+        if tool_name == "make_directory":
+            return self._fs_tool.make_directory(args["path"])
+        if tool_name == "move_path":
+            return self._fs_tool.move_path(args["source"], args["destination"])
         if tool_name == "search_text":
             return self._fs_tool.search_text(
                 args["pattern"],
@@ -265,13 +269,28 @@ class AgentRuntime:
             result = self.invoke_tool("list_directory", {"path": path})
             return self._format_tool_result("list_directory", result), [{"tool": "list_directory", "result": result}]
 
+        if "make directory" in lowered or "create folder" in lowered or "mkdir" in lowered:
+            path = self._extract_directory_path(message)
+            if not path:
+                return "Specify a directory path to create.", []
+            result = self.invoke_tool("make_directory", {"path": path})
+            return self._format_tool_result("make_directory", result), [{"tool": "make_directory", "result": result}]
+
+        if "move " in lowered or "rename " in lowered:
+            source, destination = self._extract_move_paths(message)
+            if not source or not destination:
+                return "Specify the source and destination paths in the form 'move <src> to <dst>'.", []
+            result = self.invoke_tool("move_path", {"source": source, "destination": destination})
+            return self._format_tool_result("move_path", result), [{"tool": "move_path", "result": result}]
+
         if "search text" in lowered or "grep" in lowered:
             pattern = re.sub(r"^.*(?:search text for|grep)\s+", "", message, flags=re.I).strip()
             result = self.invoke_tool("search_text", {"pattern": pattern})
             return self._format_tool_result("search_text", result), [{"tool": "search_text", "result": result}]
 
         return (
-            "Tool use supported: list files, read file <path>, search text for <text>, run command <cmd>, web search <query>.",
+            "Tool use supported: list files, read file <path>, make directory <path>, "
+            "move <src> to <dst>, search text for <text>, run command <cmd>, web search <query>.",
             [],
         )
 
@@ -290,7 +309,8 @@ class AgentRuntime:
                 system_prompt=(
                     "You are a concise adaptive local agent. "
                     "Your duties come from the operator-defined context, not a fixed product role. "
-                    "Help plan or create the requested thing while respecting that context."
+                    "Help plan or create the requested thing while respecting that context. "
+                    f"{self._brain_workspace_brief()}"
                 ),
                 user_prompt=f"Request: {message}\nOperating context:\n{memory_summary}",
             )
@@ -316,7 +336,8 @@ class AgentRuntime:
                 system_prompt=(
                     "You are a terse repo copilot inside an adaptive agent. "
                     "Use the provided operating context, repository matches, and memories. "
-                    "Do not invent files or code that were not supplied."
+                    "Do not invent files or code that were not supplied. "
+                    f"{self._brain_workspace_brief()}"
                 ),
                 user_prompt=prompt,
             )
@@ -361,7 +382,8 @@ class AgentRuntime:
                     "You are a local-first adaptive agent. "
                     "You do not have fixed duties: derive your role, priorities, and style from the current operating context. "
                     "If the operator has not defined enough context, ask concise questions that help shape your role. "
-                    "Be concise and grounded."
+                    "Be concise and grounded. "
+                    f"{self._brain_workspace_brief()}"
                 ),
                 user_prompt=(
                     f"Operating context:\n{context_summary}\n"
@@ -427,6 +449,24 @@ class AgentRuntime:
         if directory_like:
             return directory_like.group(1)
         return None
+
+    def _extract_directory_path(self, message: str) -> str | None:
+        quoted = re.search(r"[`'\"]([^`'\"]+)[`'\"]", message)
+        if quoted:
+            return quoted.group(1)
+        mkdir_match = re.search(r"(?:make directory|create folder|mkdir)\s+([A-Za-z0-9_./-]+)", message, flags=re.I)
+        if mkdir_match:
+            return mkdir_match.group(1)
+        return None
+
+    def _extract_move_paths(self, message: str) -> tuple[str | None, str | None]:
+        quoted = re.findall(r"[`'\"]([^`'\"]+)[`'\"]", message)
+        if len(quoted) >= 2:
+            return quoted[0], quoted[1]
+        match = re.search(r"(?:move|rename)\s+([A-Za-z0-9_./-]+)\s+to\s+([A-Za-z0-9_./-]+)", message, flags=re.I)
+        if match:
+            return match.group(1), match.group(2)
+        return None, None
 
     def _extract_keywords(self, message: str) -> list[str]:
         tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_/-]{2,}", message.lower())
@@ -510,6 +550,15 @@ class AgentRuntime:
                 break
         return "\n".join(lines) if lines else "- no durable operating context yet"
 
+    def _brain_workspace_brief(self) -> str:
+        relative_root = self._settings.brain_root.relative_to(self._settings.repo_root)
+        relative_workspace = self._settings.brain_workspace_dir.relative_to(self._settings.repo_root)
+        return (
+            f"You own the brain directory at {relative_root}. "
+            f"Use {relative_workspace} as your freeform external workspace. "
+            "You may create folders, write markdown notes, and rearrange files there to organize memory."
+        )
+
     def _format_tool_result(self, tool_name: str, result: dict[str, Any]) -> str:
         if not result.get("ok"):
             return f"{tool_name} failed: {result.get('error', 'unknown error')}"
@@ -519,6 +568,10 @@ class AgentRuntime:
             return f"Directory {result['path']}: {items}"
         if tool_name == "read_file":
             return f"Contents of {result['path']}:\n{result['content']}"
+        if tool_name == "make_directory":
+            return f"Created directory {result['path']}."
+        if tool_name == "move_path":
+            return f"Moved {result['source']} to {result['destination']}."
         if tool_name == "search_text":
             matches = result.get("matches", [])
             if not matches:
