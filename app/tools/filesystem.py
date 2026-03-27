@@ -54,10 +54,53 @@ class FilesystemTool:
             "truncated": truncated,
         }
 
+    def list_tree(self, path: str = ".", max_depth: int = 3, max_entries: int = 120) -> dict[str, Any]:
+        target = self._resolve(path)
+        if not target.exists():
+            return {"ok": False, "error": f"{path} does not exist"}
+        if not target.is_dir():
+            return {"ok": False, "error": f"{path} is not a directory"}
+
+        entries = []
+        for candidate in sorted(target.rglob("*")):
+            if self._should_skip_path(candidate):
+                continue
+            relative = candidate.relative_to(target)
+            if len(relative.parts) > max_depth:
+                continue
+            entries.append(
+                {
+                    "path": str(candidate.relative_to(self._repo_root)),
+                    "depth": len(relative.parts),
+                    "type": "dir" if candidate.is_dir() else "file",
+                }
+            )
+            if len(entries) >= max_entries:
+                return {
+                    "ok": True,
+                    "path": str(target.relative_to(self._repo_root)),
+                    "entries": entries,
+                    "truncated": True,
+                }
+
+        return {
+            "ok": True,
+            "path": str(target.relative_to(self._repo_root)),
+            "entries": entries,
+            "truncated": False,
+        }
+
     def write_file(self, path: str, content: str) -> dict[str, Any]:
         target = self._resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        return {"ok": True, "path": str(target.relative_to(self._repo_root)), "bytes_written": len(content)}
+
+    def append_file(self, path: str, content: str) -> dict[str, Any]:
+        target = self._resolve(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        target.write_text(existing + content, encoding="utf-8")
         return {"ok": True, "path": str(target.relative_to(self._repo_root)), "bytes_written": len(content)}
 
     def make_directory(self, path: str) -> dict[str, Any]:
@@ -80,6 +123,27 @@ class FilesystemTool:
             "source": str(source_path.relative_to(self._repo_root)),
             "destination": str(destination_path.relative_to(self._repo_root)),
         }
+
+    def delete_path(self, path: str, recursive: bool = False) -> dict[str, Any]:
+        target = self._resolve(path)
+        if not target.exists():
+            return {"ok": False, "error": f"{path} does not exist"}
+        if not self._is_brain_path(target):
+            return {"ok": False, "error": "delete_path is limited to the agent brain"}
+
+        if target.is_dir():
+            if not recursive:
+                return {"ok": False, "error": f"{path} is a directory; set recursive=true to remove it"}
+            for candidate in sorted(target.rglob("*"), key=lambda current: len(current.relative_to(target).parts), reverse=True):
+                if candidate.is_file():
+                    candidate.unlink()
+                else:
+                    candidate.rmdir()
+            target.rmdir()
+        else:
+            target.unlink()
+
+        return {"ok": True, "path": str(target.relative_to(self._repo_root))}
 
     def search_text(self, pattern: str, path: str = ".", max_matches: int = 25) -> dict[str, Any]:
         target = self._resolve(path)

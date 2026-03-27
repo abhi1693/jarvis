@@ -19,6 +19,8 @@ class Settings:
     change_set_dir: Path
     command_timeout_seconds: int
     memory_recall_limit: int
+    brain_refresh_interval_seconds: int
+    brain_working_memory_ttl_seconds: int
     llm_compat_url: str | None
     llm_model: str | None
     llm_api_key: str | None
@@ -48,6 +50,8 @@ def get_settings() -> Settings:
         change_set_dir=data_dir / "change_sets",
         command_timeout_seconds=int(os.getenv("JARVIS_COMMAND_TIMEOUT", "20")),
         memory_recall_limit=int(os.getenv("JARVIS_MEMORY_RECALL_LIMIT", "8")),
+        brain_refresh_interval_seconds=int(os.getenv("JARVIS_BRAIN_REFRESH_INTERVAL", "90")),
+        brain_working_memory_ttl_seconds=int(os.getenv("JARVIS_BRAIN_WORKING_TTL", "21600")),
         llm_compat_url=os.getenv("LLM_COMPAT_URL"),
         llm_model=os.getenv("LLM_MODEL"),
         llm_api_key=os.getenv("LLM_API_KEY"),

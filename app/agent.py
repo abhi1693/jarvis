@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.brain import BrainService
 from app.config import Settings
 from app.intents import IntentService
 from app.llm import LLMAdapter
 from app.memory_store import MemoryStore
-from app.models import InteractionResponse, IntentResult, MemoryCandidate
+from app.models import InteractionResponse
 from app.self_improvement import SelfImprovementService
 from app.tools.filesystem import FilesystemTool
 from app.tools.shell import ShellTool
@@ -25,6 +26,7 @@ class AgentRuntime:
         shell_tool: ShellTool,
         web_search_tool: WebSearchTool,
         self_improvement: SelfImprovementService,
+        brain_service: BrainService,
     ):
         self._settings = settings
         self._memory_store = memory_store
@@ -34,6 +36,7 @@ class AgentRuntime:
         self._shell_tool = shell_tool
         self._web_search_tool = web_search_tool
         self._self_improvement = self_improvement
+        self._brain_service = brain_service
 
     async def handle_interaction(
         self,
@@ -45,6 +48,7 @@ class AgentRuntime:
         media_path: str | None = None,
     ) -> InteractionResponse:
         normalized_message = message.strip() or f"{modality} interaction"
+        await self._brain_service.refresh(reason="interaction", force=False)
         intent = await self._intent_service.parse(normalized_message)
         self._memory_store.record_interaction(
             "user",
@@ -55,20 +59,30 @@ class AgentRuntime:
             metadata=metadata,
             media_path=media_path,
         )
-        self._store_memory_candidates(intent.memory_candidates, modality)
-        self._store_experience(normalized_message, modality, intent.name)
+        captured = await self._brain_service.ingest_user_message(
+            message=normalized_message,
+            modality=modality,
+            intent_name=intent.name,
+            memory_candidates=intent.memory_candidates,
+        )
 
         runtime_context = self._memory_store.list_context_memories(limit=8)
         recalled_memories = self._memory_store.recall(normalized_message, limit=self._settings.memory_recall_limit)
         skills = self._memory_store.list_recent_skills(limit=4)
+        prompt_context = self._brain_service.build_prompt_context(
+            normalized_message,
+            runtime_context,
+            recalled_memories,
+            skills,
+        )
 
         insights: list[dict[str, Any]] = []
         tool_trace: list[dict[str, Any]] = []
 
         if intent.name == "orient":
-            response_text = self._handle_orientation(normalized_message, intent, modality)
+            response_text = self._handle_orientation(captured["remembered"], modality)
         elif intent.name == "remember":
-            response_text = self._handle_remember(normalized_message, intent, modality)
+            response_text = self._handle_remember(captured["remembered"], modality)
         elif intent.name == "memory_query":
             response_text = self._handle_memory_query(runtime_context)
         elif intent.name == "web_search":
@@ -80,6 +94,7 @@ class AgentRuntime:
                 normalized_message,
                 recalled_memories,
                 runtime_context,
+                prompt_context,
             )
         elif intent.name == "evolve":
             response_text, tool_trace, insights = self._handle_evolution(normalized_message)
@@ -89,6 +104,7 @@ class AgentRuntime:
                 recalled_memories,
                 runtime_context,
                 modality,
+                prompt_context,
             )
 
         self._memory_store.record_interaction(
@@ -99,7 +115,7 @@ class AgentRuntime:
             channel=channel,
             metadata={"reply_to": modality},
         )
-        self._learn_skill(intent.name, tool_trace, normalized_message)
+        self._brain_service.learn_from_tool_trace(intent.name, tool_trace, normalized_message)
 
         return InteractionResponse(
             message=response_text,
@@ -113,14 +129,24 @@ class AgentRuntime:
     def invoke_tool(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         if tool_name == "list_directory":
             return self._fs_tool.list_directory(args.get("path", "."))
+        if tool_name == "list_tree":
+            return self._fs_tool.list_tree(
+                args.get("path", "."),
+                max_depth=int(args.get("max_depth", 3)),
+                max_entries=int(args.get("max_entries", 120)),
+            )
         if tool_name == "read_file":
             return self._fs_tool.read_file(args["path"], max_chars=int(args.get("max_chars", 12_000)))
         if tool_name == "write_file":
             return self._fs_tool.write_file(args["path"], args["content"])
+        if tool_name == "append_file":
+            return self._fs_tool.append_file(args["path"], args["content"])
         if tool_name == "make_directory":
             return self._fs_tool.make_directory(args["path"])
         if tool_name == "move_path":
             return self._fs_tool.move_path(args["source"], args["destination"])
+        if tool_name == "delete_path":
+            return self._fs_tool.delete_path(args["path"], recursive=bool(args.get("recursive", False)))
         if tool_name == "search_text":
             return self._fs_tool.search_text(
                 args["pattern"],
@@ -152,63 +178,22 @@ class AgentRuntime:
                 confidence=0.95,
             )
 
-    def _store_memory_candidates(self, candidates: list[MemoryCandidate], modality: str) -> None:
-        for candidate in candidates:
-            self._memory_store.store_memory(
-                category=candidate.category,
-                title=candidate.title,
-                content=candidate.content,
-                tags=sorted(set([*candidate.tags, candidate.category, modality])),
-                source=modality,
-                confidence=candidate.confidence,
-            )
-
-    def _store_experience(self, message: str, modality: str, intent_name: str) -> None:
-        if intent_name in {"tool_use", "evolve", "orient"}:
-            return
-        if len(message.strip()) < 12:
-            return
-        self._memory_store.store_memory(
-            category="experience",
-            title=f"{modality} interaction",
-            content=message[:500],
-            tags=["experience", modality, intent_name],
-            source=modality,
-            confidence=0.58,
-        )
-
-    def _handle_remember(self, message: str, intent: IntentResult, modality: str) -> str:
-        if intent.memory_candidates:
+    def _handle_remember(self, remembered: list[dict[str, Any]], modality: str) -> str:
+        if remembered:
             stored = ", ".join(
-                f"{candidate.title}={candidate.content}" for candidate in intent.memory_candidates[:4]
+                f"{candidate['title']}={candidate['content']}" for candidate in remembered[:4]
             )
             return f"Stored durable memory from {modality}: {stored}."
 
-        self._memory_store.store_memory(
-            category="note",
-            title=f"{modality} note",
-            content=message,
-            tags=["note", modality],
-            source=modality,
-            confidence=0.74,
-        )
-        return f"Stored that {modality} note in long-term memory."
+        return f"I did not keep that {modality} note because it did not look durable enough to retain."
 
-    def _handle_orientation(self, message: str, intent: IntentResult, modality: str) -> str:
-        if not intent.memory_candidates:
-            self._memory_store.store_memory(
-                category="context",
-                title="operator_direction",
-                content=message,
-                tags=["context", "operator", modality],
-                source=modality,
-                confidence=0.82,
-            )
-            return "Stored that as part of my operating context."
+    def _handle_orientation(self, remembered: list[dict[str, Any]], modality: str) -> str:
+        if not remembered:
+            return "I reviewed that direction but did not promote any part of it into durable context yet."
 
         lines = [
-            f"- [{candidate.category}] {candidate.title}: {candidate.content}"
-            for candidate in intent.memory_candidates[:6]
+            f"- [{candidate['category']}] {candidate['title']}: {candidate['content']}"
+            for candidate in remembered[:6]
         ]
         return "Updated my operating context with:\n" + "\n".join(lines)
 
@@ -264,6 +249,11 @@ class AgentRuntime:
             result = self.invoke_tool("read_file", {"path": path})
             return self._format_tool_result("read_file", result), [{"tool": "read_file", "result": result}]
 
+        if "tree" in lowered or "directory tree" in lowered:
+            path = self._extract_path(message) or "."
+            result = self.invoke_tool("list_tree", {"path": path})
+            return self._format_tool_result("list_tree", result), [{"tool": "list_tree", "result": result}]
+
         if "list files" in lowered or "show directory" in lowered:
             path = self._extract_path(message) or "."
             result = self.invoke_tool("list_directory", {"path": path})
@@ -283,14 +273,30 @@ class AgentRuntime:
             result = self.invoke_tool("move_path", {"source": source, "destination": destination})
             return self._format_tool_result("move_path", result), [{"tool": "move_path", "result": result}]
 
+        if "append to file" in lowered:
+            path = self._extract_path(message)
+            if not path:
+                return "Specify a file path to append to.", []
+            content = message.split(path, maxsplit=1)[-1].strip(" :")
+            result = self.invoke_tool("append_file", {"path": path, "content": content})
+            return self._format_tool_result("append_file", result), [{"tool": "append_file", "result": result}]
+
+        if "delete path" in lowered or "remove path" in lowered or "delete file" in lowered:
+            path = self._extract_path(message) or self._extract_directory_path(message)
+            if not path:
+                return "Specify a path to delete.", []
+            result = self.invoke_tool("delete_path", {"path": path})
+            return self._format_tool_result("delete_path", result), [{"tool": "delete_path", "result": result}]
+
         if "search text" in lowered or "grep" in lowered:
             pattern = re.sub(r"^.*(?:search text for|grep)\s+", "", message, flags=re.I).strip()
             result = self.invoke_tool("search_text", {"pattern": pattern})
             return self._format_tool_result("search_text", result), [{"tool": "search_text", "result": result}]
 
         return (
-            "Tool use supported: list files, read file <path>, make directory <path>, "
-            "move <src> to <dst>, search text for <text>, run command <cmd>, web search <query>.",
+            "Tool use supported: list files, tree <path>, read file <path>, append to file <path>, "
+            "make directory <path>, move <src> to <dst>, delete path <path>, search text for <text>, "
+            "run command <cmd>, web search <query>.",
             [],
         )
 
@@ -299,12 +305,17 @@ class AgentRuntime:
         message: str,
         recalled_memories: list[dict[str, Any]],
         runtime_context: list[dict[str, Any]],
+        prompt_context: str,
     ) -> tuple[str, list[dict[str, Any]]]:
         if self._message_mentions_repo(message):
-            return await self._handle_repo_creation_request(message, recalled_memories, runtime_context)
+            return await self._handle_repo_creation_request(
+                message,
+                recalled_memories,
+                runtime_context,
+                prompt_context,
+            )
 
         if self._llm_adapter.enabled:
-            memory_summary = self._build_context_summary(runtime_context, recalled_memories)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
                     "You are a concise adaptive local agent. "
@@ -312,7 +323,7 @@ class AgentRuntime:
                     "Help plan or create the requested thing while respecting that context. "
                     f"{self._brain_workspace_brief()}"
                 ),
-                user_prompt=f"Request: {message}\nOperating context:\n{memory_summary}",
+                user_prompt=f"Request: {message}\nOperating context:\n{prompt_context}",
             )
             if reply:
                 return reply, []
@@ -324,6 +335,7 @@ class AgentRuntime:
         message: str,
         recalled_memories: list[dict[str, Any]],
         runtime_context: list[dict[str, Any]],
+        prompt_context: str,
     ) -> tuple[str, list[dict[str, Any]]]:
         keywords = self._extract_keywords(message)
         pattern = " ".join(keywords[:3]) if keywords else message
@@ -331,7 +343,7 @@ class AgentRuntime:
         trace = [{"tool": "search_text", "pattern": pattern, "result": search_result}]
 
         if self._llm_adapter.enabled:
-            prompt = self._build_repo_prompt(message, runtime_context, recalled_memories, search_result)
+            prompt = self._build_repo_prompt(message, prompt_context, search_result)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
                     "You are a terse repo copilot inside an adaptive agent. "
@@ -374,9 +386,9 @@ class AgentRuntime:
         recalled_memories: list[dict[str, Any]],
         runtime_context: list[dict[str, Any]],
         modality: str,
+        prompt_context: str,
     ) -> str:
         if self._llm_adapter.enabled:
-            context_summary = self._build_context_summary(runtime_context, recalled_memories)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
                     "You are a local-first adaptive agent. "
@@ -386,7 +398,7 @@ class AgentRuntime:
                     f"{self._brain_workspace_brief()}"
                 ),
                 user_prompt=(
-                    f"Operating context:\n{context_summary}\n"
+                    f"Operating context:\n{prompt_context}\n"
                     f"Modality: {modality}\n"
                     f"User message: {message}\n"
                     "Respond in a way that fits the current context."
@@ -406,29 +418,6 @@ class AgentRuntime:
         return (
             "I do not have a fixed role yet. Tell me what duties, boundaries, and collaboration style you want, "
             "and I will turn that into durable operating context."
-        )
-
-    def _learn_skill(self, intent_name: str, tool_trace: list[dict[str, Any]], message: str) -> None:
-        if not tool_trace:
-            return
-
-        steps = []
-        for item in tool_trace:
-            steps.append(
-                {
-                    "tool": item.get("tool"),
-                    "label": item.get("label"),
-                    "pattern": item.get("pattern"),
-                    "command": item.get("command"),
-                    "query": item.get("query"),
-                }
-            )
-
-        self._memory_store.store_skill(
-            name=f"{intent_name.replace('_', ' ').title()} skill",
-            description=f"A learned execution pattern captured from: {message[:120]}",
-            trigger_hint=intent_name,
-            steps=steps,
         )
 
     def _message_mentions_repo(self, message: str) -> bool:
@@ -476,18 +465,16 @@ class AgentRuntime:
     def _build_repo_prompt(
         self,
         message: str,
-        runtime_context: list[dict[str, Any]],
-        recalled_memories: list[dict[str, Any]],
+        prompt_context: str,
         search_result: dict[str, Any],
     ) -> str:
-        context = self._build_context_summary(runtime_context, recalled_memories)
         matches = "\n".join(
             f"- {item['path']}:{item['line_number']} -> {item['line']}"
             for item in search_result.get("matches", [])[:12]
         )
         return (
             f"Task: {message}\n"
-            f"Operating context:\n{context}\n"
+            f"Operating context:\n{prompt_context}\n"
             f"Repository matches:\n{matches or '- none'}\n"
             "Respond with actionable guidance and reference the concrete matches."
         )
@@ -566,12 +553,22 @@ class AgentRuntime:
         if tool_name == "list_directory":
             items = ", ".join(item["name"] for item in result.get("items", [])[:20])
             return f"Directory {result['path']}: {items}"
+        if tool_name == "list_tree":
+            items = "\n".join(
+                f"- {'  ' * max(item['depth'] - 1, 0)}{item['path']}"
+                for item in result.get("entries", [])[:20]
+            )
+            return f"Tree for {result['path']}:\n{items}"
         if tool_name == "read_file":
             return f"Contents of {result['path']}:\n{result['content']}"
+        if tool_name == "append_file":
+            return f"Appended to {result['path']}."
         if tool_name == "make_directory":
             return f"Created directory {result['path']}."
         if tool_name == "move_path":
             return f"Moved {result['source']} to {result['destination']}."
+        if tool_name == "delete_path":
+            return f"Deleted {result['path']}."
         if tool_name == "search_text":
             matches = result.get("matches", [])
             if not matches:

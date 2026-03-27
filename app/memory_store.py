@@ -39,6 +39,8 @@ class MemoryStore:
         self._brain_root = (brain_root or (db_path.parent / "agent_brain")).resolve()
         self._workspace_root = self._brain_root / "workspace"
         self._knowledge_root = self._brain_root / "knowledge"
+        self._archive_root = self._knowledge_root / "archive"
+        self._archived_memory_root = self._archive_root / "memories"
         self._memory_root = self._knowledge_root / "memories"
         self._persona_root = self._memory_root / "persona"
         self._working_root = self._memory_root / "working"
@@ -107,9 +109,24 @@ class MemoryStore:
         confidence: float = 0.8,
         valid_from: str | None = None,
         valid_until: str | None = None,
+        created_at: str | None = None,
+        last_seen_at: str | None = None,
     ) -> int:
+        normalized_created_at = self._normalize_timestamp(created_at) or self._now_timestamp()
+        normalized_last_seen_at = self._normalize_timestamp(last_seen_at) or normalized_created_at
+        duplicate_path = self._find_duplicate_memory_path(category, title, content)
+        if duplicate_path is not None:
+            metadata, body = self._read_markdown_record(duplicate_path)
+            metadata["tags"] = sorted(set([*metadata.get("tags", []), *(tags or [])]))
+            metadata["source"] = source
+            metadata["confidence"] = max(float(metadata.get("confidence", 0.0)), confidence)
+            metadata["last_seen_at"] = normalized_last_seen_at
+            metadata["seen_count"] = int(metadata.get("seen_count", 1)) + 1
+            self._write_markdown_record(duplicate_path, metadata, body)
+            self._sync_brain_documents()
+            return int(metadata["id"])
+
         record_id = self._new_record_id()
-        created_at = self._now_timestamp()
         metadata = {
             "id": record_id,
             "category": category,
@@ -120,10 +137,12 @@ class MemoryStore:
             "confidence": confidence,
             "valid_from": valid_from,
             "valid_until": valid_until,
-            "created_at": created_at,
+            "created_at": normalized_created_at,
+            "last_seen_at": normalized_last_seen_at,
+            "seen_count": 1,
             "storage_bucket": self._memory_bucket(category),
         }
-        target = self._memory_path(record_id, category, title, created_at)
+        target = self._memory_path(record_id, category, title, normalized_created_at)
         body = f"# {title}\n\n{content}".strip() + "\n"
         self._write_markdown_record(target, metadata, body)
         self._sync_brain_documents()
@@ -141,10 +160,25 @@ class MemoryStore:
                 score = self._memory_match_score(record, tokens)
                 if score > 0:
                     scored.append((score, record))
-            scored.sort(key=lambda item: (item[0], item[1]["created_at"], item[1]["id"]), reverse=True)
+            scored.sort(
+                key=lambda item: (
+                    item[0],
+                    item[1].get("last_seen_at") or item[1]["created_at"],
+                    item[1].get("seen_count", 1),
+                    item[1]["id"],
+                ),
+                reverse=True,
+            )
             return [record for _, record in scored[:limit]]
 
-        records.sort(key=lambda record: (record["created_at"], record["id"]), reverse=True)
+        records.sort(
+            key=lambda record: (
+                record.get("last_seen_at") or record["created_at"],
+                record.get("seen_count", 1),
+                record["id"],
+            ),
+            reverse=True,
+        )
         return records[:limit]
 
     def list_recent_skills(self, limit: int = 6) -> list[dict[str, Any]]:
@@ -281,6 +315,88 @@ class MemoryStore:
         counts["insights"] = len(self._load_insight_records())
         return counts
 
+    def current_timestamp(self) -> str:
+        return self._now_timestamp()
+
+    def refresh_brain_documents(self) -> None:
+        self._sync_brain_documents()
+
+    def archive_memory(self, record_id: int, reason: str = "archived") -> bool:
+        source = self._find_memory_path(record_id)
+        if source is None:
+            return False
+
+        metadata, body = self._read_markdown_record(source)
+        metadata["archived_at"] = self._now_timestamp()
+        metadata["archive_reason"] = reason
+        metadata["archived_from_bucket"] = metadata.get("storage_bucket")
+
+        relative = source.relative_to(self._memory_root)
+        target = self._archived_memory_root / relative
+        self._write_markdown_record(target, metadata, body)
+        source.unlink()
+        self._sync_brain_documents()
+        return True
+
+    def archive_stale_memories(
+        self,
+        *,
+        categories: set[str],
+        older_than_seconds: int,
+        limit: int = 24,
+    ) -> list[int]:
+        if older_than_seconds <= 0:
+            return []
+
+        cutoff = datetime.now(timezone.utc).timestamp() - older_than_seconds
+        archived = []
+        candidates = [
+            record
+            for record in self._load_memory_records()
+            if record["category"] in categories
+        ]
+        candidates.sort(
+            key=lambda record: (
+                record.get("last_seen_at") or record["created_at"],
+                record["created_at"],
+                record["id"],
+            )
+        )
+
+        for record in candidates:
+            last_seen = self._normalize_timestamp(record.get("last_seen_at")) or record["created_at"]
+            if last_seen is None:
+                continue
+            last_seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+            if last_seen_dt.timestamp() > cutoff:
+                continue
+            if self.archive_memory(record["id"], reason="stale_working_memory"):
+                archived.append(record["id"])
+            if len(archived) >= limit:
+                break
+        return archived
+
+    def get_brain_snapshot(
+        self,
+        *,
+        query: str = "",
+        memory_limit: int = 8,
+        interaction_limit: int = 8,
+        workspace_limit: int = 4,
+    ) -> dict[str, Any]:
+        return {
+            "persona": self._read_document_excerpt(self._persona_doc_path),
+            "working_memory": self._read_document_excerpt(self._working_memory_doc_path),
+            "long_term_memory": self._read_document_excerpt(self._long_term_doc_path),
+            "skills": self._read_document_excerpt(self._skills_doc_path),
+            "insights": self._read_document_excerpt(self._insights_doc_path),
+            "workspace_map": self._read_document_excerpt(self._workspace_map_doc_path),
+            "workspace_files": self._select_workspace_documents(query=query, limit=workspace_limit),
+            "recent_memories": self.recall(query=query, limit=memory_limit),
+            "recent_interactions": self.list_recent_interactions(limit=interaction_limit),
+            "recent_skills": self.list_recent_skills(limit=6),
+        }
+
     def _initialise(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_brain_root()
@@ -288,6 +404,8 @@ class MemoryStore:
             self._brain_root,
             self._workspace_root,
             self._knowledge_root,
+            self._archive_root,
+            self._archived_memory_root,
             self._memory_root,
             self._persona_root,
             self._working_root,
@@ -515,6 +633,8 @@ class MemoryStore:
             "valid_from": metadata.get("valid_from"),
             "valid_until": metadata.get("valid_until"),
             "created_at": self._normalize_timestamp(metadata.get("created_at")),
+            "last_seen_at": self._normalize_timestamp(metadata.get("last_seen_at")),
+            "seen_count": int(metadata.get("seen_count", 1)),
         }
 
     def _write_markdown_record(self, path: Path, metadata: dict[str, Any], body: str) -> None:
@@ -534,15 +654,15 @@ class MemoryStore:
             body.append("")
         path.write_text("\n".join(body).rstrip() + "\n", encoding="utf-8")
 
-    def _read_markdown_metadata(self, path: Path) -> dict[str, Any]:
+    def _read_markdown_record(self, path: Path) -> tuple[dict[str, Any], str]:
         text = path.read_text(encoding="utf-8")
         if not text.startswith("---\n"):
-            return {}
+            return {}, text
 
         remainder = text[4:]
-        frontmatter, separator, _body = remainder.partition("\n---\n")
+        frontmatter, separator, body = remainder.partition("\n---\n")
         if not separator:
-            return {}
+            return {}, text
 
         metadata: dict[str, Any] = {}
         for line in frontmatter.splitlines():
@@ -552,6 +672,10 @@ class MemoryStore:
             if not separator:
                 continue
             metadata[key] = json.loads(raw) if raw else None
+        return metadata, body.lstrip("\n")
+
+    def _read_markdown_metadata(self, path: Path) -> dict[str, Any]:
+        metadata, _body = self._read_markdown_record(path)
         return metadata
 
     def _memory_match_score(self, record: dict[str, Any], tokens: list[str]) -> int:
@@ -572,6 +696,29 @@ class MemoryStore:
             if token in haystack["content"]:
                 score += 1
         return score
+
+    def _find_duplicate_memory_path(self, category: str, title: str, content: str) -> Path | None:
+        normalized_category = category.strip().lower()
+        normalized_title = title.strip().lower()
+        normalized_content = content.strip().lower()
+        for path in self._memory_root.rglob("*.md"):
+            metadata = self._read_markdown_metadata(path)
+            if not metadata:
+                continue
+            if (
+                str(metadata.get("category", "")).strip().lower() == normalized_category
+                and str(metadata.get("title", "")).strip().lower() == normalized_title
+                and str(metadata.get("content", "")).strip().lower() == normalized_content
+            ):
+                return path
+        return None
+
+    def _find_memory_path(self, record_id: int) -> Path | None:
+        for path in self._memory_root.rglob("*.md"):
+            metadata = self._read_markdown_metadata(path)
+            if metadata and int(metadata.get("id", -1)) == record_id:
+                return path
+        return None
 
     def _memory_bucket(self, category: str) -> str:
         if category in self._PERSONA_CATEGORIES:
@@ -626,6 +773,45 @@ class MemoryStore:
     def _slugify(self, value: str) -> str:
         slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
         return slug or "record"
+
+    def _read_document_excerpt(self, path: Path, max_chars: int = 1600) -> str:
+        if not path.exists():
+            return ""
+        content = path.read_text(encoding="utf-8").strip()
+        if len(content) <= max_chars:
+            return content
+        return content[:max_chars].rstrip() + "\n..."
+
+    def _select_workspace_documents(self, query: str, limit: int = 4, max_chars: int = 800) -> list[dict[str, str]]:
+        if not self._workspace_root.exists():
+            return []
+
+        tokens = self._search_tokens(query)
+        ranked: list[tuple[int, float, Path, str]] = []
+        for path in self._workspace_root.rglob("*.md"):
+            if path.name == "README.md":
+                continue
+            content = path.read_text(encoding="utf-8").strip()
+            lowered_path = str(path.relative_to(self._workspace_root)).lower()
+            lowered_content = content.lower()
+            score = 0
+            for token in tokens:
+                if token in lowered_path:
+                    score += 4
+                if token in lowered_content:
+                    score += 1
+            ranked.append((score, path.stat().st_mtime, path, content[:max_chars]))
+
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        results = []
+        for _score, _mtime, path, content in ranked[:limit]:
+            results.append(
+                {
+                    "path": str(path.relative_to(self._workspace_root)),
+                    "content": content,
+                }
+            )
+        return results
 
     def _row_to_interaction(self, row: sqlite3.Row) -> dict[str, Any]:
         return {

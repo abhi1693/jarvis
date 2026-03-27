@@ -47,3 +47,20 @@ def test_move_path_and_make_directory_support_brain_workspace(tmp_path):
 
     assert move_result["ok"] is True
     assert (tmp_path / "data" / "agent_brain" / "workspace" / "plans" / "draft.md").exists()
+
+
+def test_append_delete_and_tree_support_brain_workspace(tmp_path):
+    brain_root = tmp_path / "data" / "agent_brain"
+    tool = FilesystemTool(tmp_path, brain_root)
+
+    tool.make_directory("data/agent_brain/workspace/projects/demo")
+    tool.write_file("data/agent_brain/workspace/projects/demo/note.md", "# Demo\n")
+    append_result = tool.append_file("data/agent_brain/workspace/projects/demo/note.md", "next line\n")
+    tree_result = tool.list_tree("data/agent_brain/workspace", max_depth=4)
+    delete_result = tool.delete_path("data/agent_brain/workspace/projects/demo/note.md")
+
+    assert append_result["ok"] is True
+    assert tree_result["ok"] is True
+    assert any(entry["path"].endswith("projects/demo/note.md") for entry in tree_result["entries"])
+    assert delete_result["ok"] is True
+    assert not (tmp_path / "data" / "agent_brain" / "workspace" / "projects" / "demo" / "note.md").exists()

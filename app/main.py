@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -8,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.agent import AgentRuntime
+from app.brain import BrainService
 from app.config import get_settings
 from app.intents import IntentService
 from app.llm import LLMAdapter
@@ -36,6 +40,7 @@ intent_service = IntentService(llm_adapter)
 filesystem_tool = FilesystemTool(settings.repo_root, settings.brain_root)
 shell_tool = ShellTool(settings.repo_root, settings.command_timeout_seconds)
 web_search_tool = WebSearchTool()
+brain_service = BrainService(settings, memory_store, llm_adapter, filesystem_tool)
 self_improvement_service = SelfImprovementService(
     settings.repo_root,
     memory_store,
@@ -53,9 +58,40 @@ agent = AgentRuntime(
     shell_tool=shell_tool,
     web_search_tool=web_search_tool,
     self_improvement=self_improvement_service,
+    brain_service=brain_service,
 )
 
-app = FastAPI(title=settings.app_name)
+
+async def _brain_maintenance_loop() -> None:
+    while True:
+        try:
+            await brain_service.refresh(reason="background", force=False)
+        except Exception as error:
+            memory_store.store_evolution_insight(
+                severity="medium",
+                source="brain_loop",
+                title="Brain refresh failed",
+                details=str(error),
+                status="open",
+            )
+        await asyncio.sleep(max(settings.brain_refresh_interval_seconds, 1))
+
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
+    await brain_service.refresh(reason="startup", force=True)
+    app_instance.state.brain_task = asyncio.create_task(_brain_maintenance_loop())
+    try:
+        yield
+    finally:
+        task = getattr(app_instance.state, "brain_task", None)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
