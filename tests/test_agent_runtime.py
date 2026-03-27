@@ -35,6 +35,28 @@ class StubIntentService:
         )
 
 
+class StubConversationIntentService:
+    async def parse(self, _message: str) -> IntentResult:
+        return IntentResult(
+            name="conversation",
+            confidence=0.9,
+            suggested_tools=[],
+            memory_candidates=[],
+        )
+
+
+class DisabledLLM:
+    @property
+    def enabled(self) -> bool:
+        return False
+
+    async def complete_json(self, _system_prompt: str, _user_prompt: str):
+        return None
+
+    async def complete_text(self, _system_prompt: str, _user_prompt: str) -> str | None:
+        return None
+
+
 class StubShellTool:
     def run(self, _command: str) -> dict[str, object]:
         return {"ok": True, "returncode": 0, "stdout": "", "stderr": ""}
@@ -134,3 +156,32 @@ def test_agent_runtime_discovers_skill_bundles_before_prompting_llm(tmp_path: Pa
     assert "Use this skill when debugging Python services and test failures." in prompt
     assert "Prefer pytest fixtures and assertion introspection when debugging tests." in prompt
     assert "Selected skill files in the operating context are active instructions for this turn." in system_prompt
+
+
+def test_agent_runtime_fallback_conversation_varies_without_llm(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    settings.llm_compat_url = None
+    settings.llm_model = None
+    llm = DisabledLLM()
+    store = MemoryStore(settings.db_path, settings.brain_root, settings.brain_skill_source_dirs)
+    fs_tool = FilesystemTool(settings.repo_root, settings.brain_root)
+    brain = BrainService(settings, store, llm, fs_tool)
+    agent = AgentRuntime(
+        settings,
+        store,
+        StubConversationIntentService(),
+        llm,
+        fs_tool,
+        StubShellTool(),
+        StubWebSearchTool(),
+        StubSelfImprovementService(),
+        brain,
+    )
+
+    greeting = asyncio.run(agent.handle_interaction("hello", modality="text"))
+    capabilities = asyncio.run(agent.handle_interaction("what can you do?", modality="text"))
+
+    assert greeting.message == "Hello. I’m here."
+    assert "read and write files" in capabilities.message
+    assert "Open-ended chat is limited" in capabilities.message
+    assert capabilities.message != greeting.message

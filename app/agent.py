@@ -425,9 +425,7 @@ class AgentRuntime:
                 "Give me the next task, a correction, or a new instruction and I’ll adjust."
             )
 
-        return (
-            "I can do better than generic. Give me the role you want me to play, the standards you care about, and how you prefer to work, and I’ll settle into it."
-        )
+        return self._build_rule_based_conversation_reply(message, runtime_context, recalled_memories)
 
     def _message_mentions_repo(self, message: str) -> bool:
         lowered = message.lower()
@@ -524,6 +522,77 @@ class AgentRuntime:
             f"{context_hint}I can turn '{subject}' into something concrete. "
             "Give me the outcome, the constraints, and the first deadline. If this belongs in the repo, point me at the code and I’ll work from there."
         )
+
+    def _build_rule_based_conversation_reply(
+        self,
+        message: str,
+        runtime_context: list[dict[str, Any]],
+        recalled_memories: list[dict[str, Any]],
+    ) -> str:
+        lowered = message.strip().lower()
+        context_summary = self._build_context_summary(runtime_context, recalled_memories)
+        llm_missing = not self._llm_adapter.enabled
+
+        if re.fullmatch(r"(hi|hello|hey|yo|sup|good morning|good afternoon|good evening)[!. ]*", lowered):
+            return (
+                "Hello. I’m here."
+                if not runtime_context
+                else f"Hello. I’m working from this context already:\n{context_summary}"
+            )
+
+        if any(token in lowered for token in ["thank you", "thanks", "appreciate it", "cheers"]):
+            return "Of course."
+
+        if any(token in lowered for token in ["how are you", "how's it going", "how are things"]):
+            return "Steady. Ready when you are."
+
+        if any(token in lowered for token in ["who are you", "what are you", "what is this app"]):
+            response = (
+                "I’m your local adaptive assistant. I can keep memory, inspect the repo, work with files and commands, "
+                "search the web, and adapt to the operating context you give me."
+            )
+            if llm_missing:
+                response += (
+                    " Right now the language model backend is not configured, so broad conversation is running in fallback mode."
+                )
+            return response
+
+        if any(token in lowered for token in ["what can you do", "help", "capabilities", "what do you do"]):
+            response = (
+                "I can keep memory, inspect the repo, read and write files, run commands, search text, and use web search."
+            )
+            if llm_missing:
+                response += (
+                    " Open-ended chat is limited at the moment because no language model backend is configured."
+                )
+            response += " Give me a concrete task, a file path, a bug, or an operating rule and I’ll work from it."
+            return response
+
+        if self._message_mentions_repo(message):
+            return (
+                "I can help with that directly. Point me at a file, symbol, command, or error and I’ll inspect the repo."
+            )
+
+        if lowered.endswith("?") or re.match(r"^(what|why|how|when|where|who|can|could|would|should)\b", lowered):
+            if llm_missing:
+                return (
+                    "I don’t have the language model backend configured right now, so open-ended answers are limited. "
+                    "I can still do concrete work with files, commands, repo search, web search, and memory. "
+                    "If you want natural conversation, set `LLM_COMPAT_URL` and `LLM_MODEL`."
+                )
+            return "Ask the question again with a bit more detail and I’ll answer it directly."
+
+        subject = re.sub(r"^(please|can you|could you|would you)\s+", "", message, flags=re.I).strip()
+        if not subject:
+            subject = "that"
+
+        if llm_missing:
+            return (
+                f"I heard: {subject}. I can still work concretely in fallback mode. "
+                "Give me a task, file, bug, command, search, or operating rule and I’ll move on it."
+            )
+
+        return f"I heard: {subject}. Give me the next concrete move and I’ll take it."
 
     def _build_context_summary(
         self,
