@@ -13,21 +13,29 @@ const overlayCanvas = document.querySelector("#overlay-canvas");
 const canvas = document.querySelector("#snapshot-canvas");
 const enrollAdminButton = document.querySelector("#enroll-admin");
 const cameraStatus = document.querySelector("#camera-status");
-const startVoiceButton = document.querySelector("#start-voice");
-const stopVoiceButton = document.querySelector("#stop-voice");
+const toggleVoiceButton = document.querySelector("#toggle-voice");
 const voiceStatus = document.querySelector("#voice-status");
 const voiceTranscript = document.querySelector("#voice-transcript");
+const micBadge = document.querySelector("#mic-badge");
+const micLevelBar = document.querySelector("#mic-level");
 
 let cameraStream = null;
 let observationTimer = null;
 let voiceStream = null;
-let mediaRecorder = null;
-let voiceChunks = [];
 let speechRecognition = null;
 let finalTranscript = "";
 let interimTranscript = "";
 let lastObservation = null;
 let cameraStartPromise = null;
+let voiceSubmitTimer = null;
+let voiceRecognitionActive = false;
+let voiceModeEnabled = false;
+let voicePauseReason = null;
+let voiceRequestInFlight = false;
+let micMeterFrame = null;
+let audioContext = null;
+let analyserNode = null;
+let mediaStreamSource = null;
 
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -159,14 +167,6 @@ const refreshState = async () => {
   const state = await fetchJson("/api/state");
   renderState(state);
 };
-
-const blobToDataUrl = (blob) =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
 
 const waitForVideoFrame = () =>
   new Promise((resolve) => {
@@ -306,6 +306,123 @@ const startCamera = async () => {
   }
 };
 
+const setMicLevel = (level = 0.04) => {
+  micLevelBar.style.transform = `scaleX(${Math.max(0.04, Math.min(1, level))})`;
+};
+
+const updateMicBadge = (tone, label) => {
+  micBadge.className = `pill mic-pill ${tone}`;
+  micBadge.textContent = label;
+};
+
+const syncVoiceUi = () => {
+  toggleVoiceButton.textContent = voiceModeEnabled ? "Mute Mic" : "Enable Mic";
+  toggleVoiceButton.classList.toggle("live-active", voiceModeEnabled);
+
+  if (!voiceModeEnabled) {
+    updateMicBadge("idle", "Mic off");
+    return;
+  }
+
+  if (voicePauseReason === "processing") {
+    updateMicBadge("thinking", "Thinking");
+    return;
+  }
+
+  if (voicePauseReason === "speaking") {
+    updateMicBadge("speaking", "Speaking");
+    return;
+  }
+
+  updateMicBadge("live", voiceRecognitionActive ? "Listening" : "Mic ready");
+};
+
+const updateTranscriptView = (fallbackText) => {
+  const text = `${finalTranscript} ${interimTranscript}`.trim();
+  if (text) {
+    voiceTranscript.textContent = text;
+    return;
+  }
+
+  if (fallbackText) {
+    voiceTranscript.textContent = fallbackText;
+    return;
+  }
+
+  if (!voiceModeEnabled) {
+    voiceTranscript.textContent = "Enable the mic to talk with Jarvis in real time.";
+    return;
+  }
+
+  if (voicePauseReason === "processing") {
+    voiceTranscript.textContent = "Working on your request...";
+    return;
+  }
+
+  if (voicePauseReason === "speaking") {
+    voiceTranscript.textContent = "Speaking the reply...";
+    return;
+  }
+
+  voiceTranscript.textContent = "Listening for your next instruction...";
+};
+
+const stopMicMeter = async () => {
+  if (micMeterFrame) {
+    cancelAnimationFrame(micMeterFrame);
+    micMeterFrame = null;
+  }
+
+  if (mediaStreamSource) {
+    mediaStreamSource.disconnect();
+    mediaStreamSource = null;
+  }
+
+  if (analyserNode) {
+    analyserNode.disconnect();
+    analyserNode = null;
+  }
+
+  if (audioContext) {
+    await audioContext.close();
+    audioContext = null;
+  }
+
+  setMicLevel(0.04);
+};
+
+const startMicMeter = async (stream) => {
+  await stopMicMeter();
+
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass || !stream) {
+    setMicLevel(0.18);
+    return;
+  }
+
+  audioContext = new AudioContextClass();
+  analyserNode = audioContext.createAnalyser();
+  analyserNode.fftSize = 1024;
+  mediaStreamSource = audioContext.createMediaStreamSource(stream);
+  mediaStreamSource.connect(analyserNode);
+  const samples = new Uint8Array(analyserNode.fftSize);
+
+  const tick = () => {
+    if (!analyserNode) return;
+    analyserNode.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) {
+      const normalized = (sample - 128) / 128;
+      sum += normalized * normalized;
+    }
+    const rms = Math.sqrt(sum / samples.length);
+    setMicLevel(rms * 4.5);
+    micMeterFrame = requestAnimationFrame(tick);
+  };
+
+  tick();
+};
+
 const enrollAdmin = async () => {
   if (!cameraStream) {
     await startCamera();
@@ -334,98 +451,217 @@ const enrollAdmin = async () => {
   }
 };
 
-const updateTranscriptView = () => {
-  const text = `${finalTranscript} ${interimTranscript}`.trim();
-  voiceTranscript.textContent = text || "No speech captured yet.";
+const createSpeechRecognition = () => {
+  const recognition = new SpeechRecognitionClass();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = "en-US";
+
+  recognition.onstart = () => {
+    voiceRecognitionActive = true;
+    syncVoiceUi();
+    updateTranscriptView();
+  };
+
+  recognition.onresult = (event) => {
+    interimTranscript = "";
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const segment = event.results[i][0].transcript.trim();
+      if (!segment) continue;
+
+      if (event.results[i].isFinal) {
+        finalTranscript = `${finalTranscript} ${segment}`.trim();
+      } else {
+        interimTranscript = `${interimTranscript} ${segment}`.trim();
+      }
+    }
+
+    updateTranscriptView();
+
+    if (finalTranscript) {
+      clearTimeout(voiceSubmitTimer);
+      voiceSubmitTimer = window.setTimeout(flushVoiceTurn, 850);
+    }
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      voiceStatus.textContent = "Mic permission was blocked. Allow microphone access and try again.";
+      stopVoice();
+      return;
+    }
+
+    if (event.error === "no-speech" || event.error === "aborted") {
+      return;
+    }
+
+    voiceStatus.textContent = `Speech recognition error: ${event.error}.`;
+    updateMicBadge("error", "Mic error");
+  };
+
+  recognition.onend = () => {
+    voiceRecognitionActive = false;
+    syncVoiceUi();
+    if (voiceModeEnabled && !voicePauseReason) {
+      window.setTimeout(startSpeechRecognition, 120);
+    }
+  };
+
+  return recognition;
 };
 
-const startVoice = async () => {
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-    voiceStatus.textContent = "Voice capture is not available in this browser.";
-    return;
+const startSpeechRecognition = () => {
+  if (!SpeechRecognitionClass || !voiceModeEnabled || voicePauseReason || voiceRecognitionActive) return;
+  if (!speechRecognition) {
+    speechRecognition = createSpeechRecognition();
   }
+
+  try {
+    speechRecognition.start();
+  } catch (error) {
+    if (!String(error).includes("already started")) {
+      voiceStatus.textContent = "Speech recognition could not start.";
+    }
+  }
+};
+
+const stopSpeechRecognition = () => {
+  if (speechRecognition && voiceRecognitionActive) {
+    speechRecognition.stop();
+  }
+};
+
+const speakAssistantReply = async (message) => {
+  if (!voiceModeEnabled || !("speechSynthesis" in window) || !message) return;
+
+  voicePauseReason = "speaking";
+  syncVoiceUi();
+  updateTranscriptView();
+  stopSpeechRecognition();
+  window.speechSynthesis.cancel();
+
+  await new Promise((resolve) => {
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.rate = 1.02;
+    utterance.pitch = 1;
+    utterance.onend = resolve;
+    utterance.onerror = resolve;
+    window.speechSynthesis.speak(utterance);
+  });
+};
+
+async function flushVoiceTurn() {
+  clearTimeout(voiceSubmitTimer);
+  voiceSubmitTimer = null;
+
+  const transcript = `${finalTranscript}`.trim();
+  if (!transcript || voiceRequestInFlight) return;
+
   finalTranscript = "";
   interimTranscript = "";
+  voicePauseReason = "processing";
+  voiceRequestInFlight = true;
+  syncVoiceUi();
   updateTranscriptView();
+  stopSpeechRecognition();
 
-  voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  voiceChunks = [];
-  mediaRecorder = new MediaRecorder(voiceStream);
-  mediaRecorder.ondataavailable = (event) => {
-    if (event.data.size > 0) voiceChunks.push(event.data);
-  };
-  mediaRecorder.start();
+  try {
+    const response = await fetchJson("/api/interactions", {
+      method: "POST",
+      body: JSON.stringify({
+        message: transcript,
+        note: transcript,
+        modality: "audio",
+        metadata: {
+          transcript_source: "browser_speech",
+          transcript_available: true,
+          realtime: true,
+          auto_submitted: true,
+        },
+      }),
+    });
 
-  if (SpeechRecognitionClass) {
-    speechRecognition = new SpeechRecognitionClass();
-    speechRecognition.continuous = true;
-    speechRecognition.interimResults = true;
-    speechRecognition.lang = "en-US";
-    speechRecognition.onresult = (event) => {
-      interimTranscript = "";
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const segment = event.results[i][0].transcript.trim();
-        if (event.results[i].isFinal) {
-          finalTranscript = `${finalTranscript} ${segment}`.trim();
-        } else {
-          interimTranscript = `${interimTranscript} ${segment}`.trim();
-        }
-      }
-      updateTranscriptView();
-    };
-    speechRecognition.onerror = () => {
-      voiceStatus.textContent = "Speech recognition had an error. Audio is still being recorded.";
-    };
-    speechRecognition.start();
-    voiceStatus.textContent = "Listening. Speak naturally.";
-  } else {
-    voiceStatus.textContent =
-      "Recording audio. Browser speech recognition is unavailable, so only the audio file will be stored.";
+    voiceStatus.textContent = response.message || response.detail || "Voice turn processed.";
+    await refreshState();
+
+    if (response.message) {
+      await speakAssistantReply(response.message);
+    }
+  } finally {
+    voiceRequestInFlight = false;
+    voicePauseReason = null;
+    syncVoiceUi();
+    updateTranscriptView();
+    if (voiceModeEnabled) {
+      startSpeechRecognition();
+    }
   }
+}
+
+const startVoice = async () => {
+  if (voiceModeEnabled) return;
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    voiceStatus.textContent = "Microphone access is not available in this browser.";
+    return;
+  }
+
+  if (!SpeechRecognitionClass) {
+    voiceStatus.textContent =
+      "Live voice needs browser speech recognition support. Use a Chromium-based browser.";
+    return;
+  }
+
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (error) {
+    voiceStatus.textContent = "Mic permission was blocked. Allow microphone access and try again.";
+    return;
+  }
+
+  voiceModeEnabled = true;
+  voicePauseReason = null;
+  finalTranscript = "";
+  interimTranscript = "";
+  await startMicMeter(voiceStream);
+  syncVoiceUi();
+  updateTranscriptView();
+  voiceStatus.textContent =
+    "Live mic enabled. Speak naturally and each utterance will be sent automatically.";
+  startSpeechRecognition();
 };
 
 const stopVoice = async () => {
-  if (speechRecognition) {
-    speechRecognition.stop();
-    speechRecognition = null;
+  voiceModeEnabled = false;
+  voicePauseReason = null;
+  clearTimeout(voiceSubmitTimer);
+  voiceSubmitTimer = null;
+  finalTranscript = "";
+  interimTranscript = "";
+  stopSpeechRecognition();
+
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
   }
 
-  const recorder = mediaRecorder;
-  const stream = voiceStream;
-  mediaRecorder = null;
-  voiceStream = null;
-
-  if (!recorder) return;
-
-  await new Promise((resolve) => {
-    recorder.addEventListener("stop", resolve, { once: true });
-    recorder.stop();
-  });
-
-  if (stream) {
-    stream.getTracks().forEach((track) => track.stop());
+  if (voiceStream) {
+    voiceStream.getTracks().forEach((track) => track.stop());
+    voiceStream = null;
   }
 
-  const transcript = `${finalTranscript}`.trim();
-  const audioBlob = voiceChunks.length ? new Blob(voiceChunks, { type: recorder.mimeType || "audio/webm" }) : null;
-  const audioDataUrl = audioBlob ? await blobToDataUrl(audioBlob) : null;
+  await stopMicMeter();
+  syncVoiceUi();
+  updateTranscriptView();
+  voiceStatus.textContent = "Mic disabled.";
+};
 
-  const response = await fetchJson("/api/interactions", {
-    method: "POST",
-    body: JSON.stringify({
-      message: transcript,
-      note: transcript || "audio note captured without transcript",
-      modality: "audio",
-      audio_data_url: audioDataUrl,
-      metadata: {
-        transcript_source: SpeechRecognitionClass ? "browser_speech" : "none",
-        transcript_available: Boolean(transcript),
-      },
-    }),
-  });
+const toggleVoiceMode = async () => {
+  if (voiceModeEnabled) {
+    await stopVoice();
+    return;
+  }
 
-  voiceStatus.textContent = response.message;
-  await refreshState();
+  await startVoice();
 };
 
 chatForm.addEventListener("submit", async (event) => {
@@ -449,8 +685,7 @@ runEvolutionButton.addEventListener("click", async () => {
 
 refreshButton.addEventListener("click", refreshState);
 enrollAdminButton.addEventListener("click", enrollAdmin);
-startVoiceButton.addEventListener("click", startVoice);
-stopVoiceButton.addEventListener("click", stopVoice);
+toggleVoiceButton.addEventListener("click", toggleVoiceMode);
 
 profileForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -467,6 +702,8 @@ profileForm.addEventListener("submit", async (event) => {
   await refreshState();
 });
 
+syncVoiceUi();
+updateTranscriptView();
 refreshState();
 startCamera();
 setInterval(refreshState, 12000);

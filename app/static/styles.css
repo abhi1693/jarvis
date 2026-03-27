@@ -196,6 +196,36 @@ video {
   gap: 12px;
 }
 
+.live-voice-card {
+  gap: 12px;
+}
+
+.live-voice-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mic-visualizer {
+  position: relative;
+  overflow: hidden;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+}
+
+.mic-level {
+  width: 100%;
+  height: 100%;
+  transform: scaleX(0.04);
+  transform-origin: left center;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #6ea7ff, #facc15);
+  transition: transform 120ms ease-out;
+}
+
 .transcript {
   min-height: 88px;
   margin: 0;
@@ -228,6 +258,10 @@ button {
   cursor: pointer;
 }
 
+button.live-active {
+  background: linear-gradient(135deg, #ffb36a, #ffe082);
+}
+
 button.ghost {
   background: transparent;
   border: 1px solid var(--line);
@@ -242,6 +276,36 @@ button.ghost {
   font-size: 0.75rem;
   background: rgba(255, 159, 104, 0.14);
   color: var(--warning);
+}
+
+.mic-pill {
+  min-width: 92px;
+  justify-content: center;
+}
+
+.mic-pill.idle {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
+.mic-pill.live {
+  background: rgba(102, 217, 192, 0.16);
+  color: var(--accent-strong);
+}
+
+.mic-pill.thinking {
+  background: rgba(110, 167, 255, 0.16);
+  color: #b9d3ff;
+}
+
+.mic-pill.speaking {
+  background: rgba(255, 159, 104, 0.14);
+  color: var(--warning);
+}
+
+.mic-pill.error {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fca5a5;
 }
 
 @media (max-width: 1120px) {

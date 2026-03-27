@@ -39,17 +39,24 @@
         <div class="panel-header">
           <h2>Voice</h2>
           <div class="actions">
-            <button id="start-voice">Start Voice</button>
-            <button id="stop-voice" class="ghost">Stop</button>
+            <button id="toggle-voice">Enable Mic</button>
           </div>
         </div>
-        <div class="memory-card">
-          <span class="label">Transcript</span>
-          <p id="voice-transcript" class="transcript">No speech captured yet.</p>
+        <div class="memory-card live-voice-card">
+          <div class="live-voice-top">
+            <span class="label">Live Transcript</span>
+            <span id="mic-badge" class="pill mic-pill idle">Mic off</span>
+          </div>
+          <div class="mic-visualizer" aria-hidden="true">
+            <div id="mic-level" class="mic-level"></div>
+          </div>
+          <p id="voice-transcript" class="transcript">
+            Enable the mic to talk with Jarvis in real time.
+          </p>
         </div>
         <p id="voice-status" class="muted">
-          Uses browser speech recognition when available. Audio is still stored even if transcript
-          support is missing.
+          Live mic mode listens continuously, sends each utterance automatically, and speaks the
+          reply back when supported by the browser.
         </p>
       </section>
 
