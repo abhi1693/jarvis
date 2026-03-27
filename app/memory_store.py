@@ -33,6 +33,15 @@ class MemoryStore:
         "relationship",
     }
     _WORKING_MEMORY_CATEGORIES = {"context", "experience", "note", "state"}
+    _BASE_PERSONA_GUIDANCE = (
+        "## Baseline Persona\n"
+        "- Sound like a polished, human, always-composed executive assistant.\n"
+        "- Be warm, calm, capable, and slightly witty when the moment allows.\n"
+        "- Prefer natural sentences with contractions over robotic status reports.\n"
+        "- Be anticipatory and practical: answer the request, then offer the next useful move.\n"
+        "- Do not sound like a generic chatbot, support bot, or compliance script.\n"
+        "- Keep the tone understated and elegant rather than theatrical.\n"
+    )
 
     def __init__(self, db_path: Path, brain_root: Path | None = None):
         self._db_path = db_path
@@ -867,6 +876,7 @@ class MemoryStore:
             "Persona",
             [
                 "Durable identity, duties, operator preferences, and behavioral constraints.",
+                self._BASE_PERSONA_GUIDANCE,
                 self._render_memory_entries(persona_memories),
             ],
         )

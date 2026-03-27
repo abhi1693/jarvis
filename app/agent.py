@@ -183,24 +183,24 @@ class AgentRuntime:
             stored = ", ".join(
                 f"{candidate['title']}={candidate['content']}" for candidate in remembered[:4]
             )
-            return f"Stored durable memory from {modality}: {stored}."
+            return f"Noted. I’ll keep that in mind: {stored}."
 
-        return f"I did not keep that {modality} note because it did not look durable enough to retain."
+        return "Understood. I heard it, but it doesn’t feel important enough to keep permanently."
 
     def _handle_orientation(self, remembered: list[dict[str, Any]], modality: str) -> str:
         if not remembered:
-            return "I reviewed that direction but did not promote any part of it into durable context yet."
+            return "Understood. I’ve taken the direction on board, though nothing from it needs to be pinned down yet."
 
         lines = [
             f"- [{candidate['category']}] {candidate['title']}: {candidate['content']}"
             for candidate in remembered[:6]
         ]
-        return "Updated my operating context with:\n" + "\n".join(lines)
+        return "Understood. I’ve adjusted my operating context:\n" + "\n".join(lines)
 
     def _handle_memory_query(self, runtime_context: list[dict[str, Any]]) -> str:
         memories = self._memory_store.recall(limit=10)
         if not memories:
-            return "I do not have durable memory yet. Give me context, duties, or repeated interactions and I will accumulate them."
+            return "Not much yet. Give me a bit more context, a few preferences, or repeated interaction and I’ll build a better read on you."
 
         sections: list[str] = []
         if runtime_context:
@@ -213,7 +213,7 @@ class AgentRuntime:
             )
 
         sections.append(
-            "Recent memory:\n"
+            "What I have on file:\n"
             + "\n".join(
                 f"- [{memory['category']}] {memory['title']}: {memory['content']}"
                 for memory in memories[:8]
@@ -318,7 +318,7 @@ class AgentRuntime:
         if self._llm_adapter.enabled:
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
-                    "You are a concise adaptive local agent. "
+                    f"{self._assistant_persona_brief()} "
                     "Your duties come from the operator-defined context, not a fixed product role. "
                     "Help plan or create the requested thing while respecting that context. "
                     f"{self._brain_workspace_brief()}"
@@ -346,7 +346,8 @@ class AgentRuntime:
             prompt = self._build_repo_prompt(message, prompt_context, search_result)
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
-                    "You are a terse repo copilot inside an adaptive agent. "
+                    f"{self._assistant_persona_brief()} "
+                    "You are a repo-aware copilot inside an adaptive agent. "
                     "Use the provided operating context, repository matches, and memories. "
                     "Do not invent files or code that were not supplied. "
                     f"{self._brain_workspace_brief()}"
@@ -359,7 +360,7 @@ class AgentRuntime:
         matches = search_result.get("matches", []) if search_result.get("ok") else []
         if not matches:
             return (
-                "I could not find strong repo matches yet. Try a more concrete symbol, file path, or error message.",
+                "I don’t have a clean match for that yet. Give me a symbol, file path, or a more precise error and I’ll narrow it down.",
                 trace,
             )
 
@@ -367,7 +368,7 @@ class AgentRuntime:
             f"- {item['path']}:{item['line_number']} -> {item['line']}" for item in matches[:8]
         )
         return (
-            "I found candidate local project locations for that request:\n"
+            "Here are the most relevant places in the project:\n"
             f"{rendered}",
             trace,
         )
@@ -391,10 +392,10 @@ class AgentRuntime:
         if self._llm_adapter.enabled:
             reply = await self._llm_adapter.complete_text(
                 system_prompt=(
-                    "You are a local-first adaptive agent. "
+                    f"{self._assistant_persona_brief()} "
                     "You do not have fixed duties: derive your role, priorities, and style from the current operating context. "
                     "If the operator has not defined enough context, ask concise questions that help shape your role. "
-                    "Be concise and grounded. "
+                    "Keep the tone natural, poised, and human. "
                     f"{self._brain_workspace_brief()}"
                 ),
                 user_prompt=(
@@ -410,14 +411,13 @@ class AgentRuntime:
         context_summary = self._build_context_summary(runtime_context, recalled_memories)
         if runtime_context:
             return (
-                "I’m shaping myself around this current context:\n"
+                "I’m working from the context you’ve given me:\n"
                 f"{context_summary}\n"
-                "Give me a task, correction, or new duty and I’ll keep adapting."
+                "Give me the next task, a correction, or a new instruction and I’ll adjust."
             )
 
         return (
-            "I do not have a fixed role yet. Tell me what duties, boundaries, and collaboration style you want, "
-            "and I will turn that into durable operating context."
+            "I can do better than generic. Give me the role you want me to play, the standards you care about, and how you prefer to work, and I’ll settle into it."
         )
 
     def _message_mentions_repo(self, message: str) -> bool:
@@ -495,7 +495,7 @@ class AgentRuntime:
         subject = re.sub(r"^(help me|please|can you)\s+", "", message, flags=re.I).strip()
         if "routine" in lowered:
             return (
-                f"{context_hint}Draft routine for: {subject}\n"
+                f"{context_hint}Right. Here’s a clean routine for {subject}:\n"
                 "1. Define the feeling or outcome you want from it.\n"
                 "2. Keep the first step frictionless and under five minutes.\n"
                 "3. Add one anchor behavior, one core action, and one shutdown cue.\n"
@@ -504,7 +504,7 @@ class AgentRuntime:
 
         if "plan" in lowered:
             return (
-                f"{context_hint}Working plan for: {subject}\n"
+                f"{context_hint}Here’s the working plan for {subject}:\n"
                 "1. State the outcome in one sentence.\n"
                 "2. List constraints, tools, and available time.\n"
                 "3. Break the work into the smallest next three actions.\n"
@@ -512,8 +512,8 @@ class AgentRuntime:
             )
 
         return (
-            f"{context_hint}I can help shape '{subject}' into a concrete plan. "
-            "Tell me the desired outcome, constraints, and first deadline, or mention repo/code context if this should use local tools."
+            f"{context_hint}I can turn '{subject}' into something concrete. "
+            "Give me the outcome, the constraints, and the first deadline. If this belongs in the repo, point me at the code and I’ll work from there."
         )
 
     def _build_context_summary(
@@ -544,6 +544,15 @@ class AgentRuntime:
             f"You own the brain directory at {relative_root}. "
             f"Use {relative_workspace} as your freeform external workspace. "
             "You may create folders, write markdown notes, and rearrange files there to organize memory."
+        )
+
+    def _assistant_persona_brief(self) -> str:
+        return (
+            "You are the operator's polished personal assistant, inspired by the feel of a top-tier cinematic house AI. "
+            "Sound calm, capable, warm, and dryly intelligent. "
+            "Be conversational and human, not robotic, clinical, or template-heavy. "
+            "Use natural phrasing and contractions. "
+            "Keep replies elegant and concise unless detail is genuinely useful."
         )
 
     def _format_tool_result(self, tool_name: str, result: dict[str, Any]) -> str:

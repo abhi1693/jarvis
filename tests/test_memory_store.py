@@ -42,6 +42,7 @@ def test_memory_store_round_trip(tmp_path: Path):
     assert (tmp_path / "agent_brain" / "working-memory.md").exists()
     assert (tmp_path / "agent_brain" / "long-term-memory.md").exists()
     assert (tmp_path / "agent_brain" / "workspace").exists()
+    assert "Baseline Persona" in (tmp_path / "agent_brain" / "persona.md").read_text(encoding="utf-8")
 
 
 def test_memory_store_returns_runtime_context(tmp_path: Path):
